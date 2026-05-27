@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import base64
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from collections import defaultdict
 import pandas as pd
@@ -12,7 +13,7 @@ import streamlit as st
 VERSAO = "V1.0"
 
 # ==============================
-# TEMA (espelho do RPA)
+# TEMA TR (espelho do RPA)
 # ==============================
 def apply_tr_theme():
     st.markdown("""
@@ -82,6 +83,21 @@ def apply_tr_theme():
         }
         </style>
     """, unsafe_allow_html=True)
+
+
+# ==============================
+# CARREGAMENTO DOS MODELOS .BGR
+# ==============================
+def carregar_bgr_bytes(nome_arquivo_b64: str):
+    caminho = os.path.join(os.path.dirname(__file__), nome_arquivo_b64)
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            b64 = f.read().strip()
+        b64 = "".join(b64.split())
+        return base64.b64decode(b64)
+    except Exception as e:
+        st.warning(f"⚠ Não foi possível carregar o modelo '{nome_arquivo_b64}': {e}")
+        return None
 
 
 # ==============================
@@ -204,7 +220,7 @@ LEIAUTES = {
         },
         "registros": {
             "10": [
-                ("fixo",       2,  "10"),
+                ("fixo",        2,  "10"),
                 ("empregado",  10),
                 ("competencia", 6),
                 ("rubrica",     9),
@@ -217,10 +233,10 @@ LEIAUTES = {
                 ("cnpj_operadora", 14),
             ],
             "25": [
-                ("fixo",               2, "25"),
-                ("tipo_beneficiario",  1),
-                ("codigo_beneficiario",10),
-                ("valor",              9),
+                ("fixo",                2, "25"),
+                ("tipo_beneficiario",   1),
+                ("codigo_beneficiario", 10),
+                ("valor",               9),
             ],
         },
     }
@@ -280,12 +296,12 @@ def montar_registro(layout, tipo_registro, dados):
 # LEITURA EXCEL
 # ==============================
 def carregar_excel(arquivo_bytes):
-    # Tenta xlsx primeiro, depois xls
     try:
-        df = pd.read_excel(io.BytesIO(arquivo_bytes), sheet_name=0, header=None, dtype=object)
+        df = pd.read_excel(io.BytesIO(arquivo_bytes), sheet_name=0,
+                           header=None, dtype=object)
     except Exception:
-        df = pd.read_excel(io.BytesIO(arquivo_bytes), sheet_name=0, header=None,
-                           dtype=object, engine="xlrd")
+        df = pd.read_excel(io.BytesIO(arquivo_bytes), sheet_name=0,
+                           header=None, dtype=object, engine="xlrd")
     return df.fillna("")
 
 
@@ -347,14 +363,26 @@ def detectar_colunas(df, cab1, cab2):
         a = normalizar(linha1[col])
         b = normalizar(linha2[col])
         combinado = f"{a} {b}".strip()
-        if col_tipo is None and ("tipo de calculo" in combinado or (a == "tipo de" and b == "calculo")):
+        if col_tipo is None and (
+            "tipo de calculo" in combinado or
+            (a == "tipo de" and b == "calculo")
+        ):
             col_tipo = col; continue
-        if col_emp is None and ("codigo empregado" in combinado or "codigo folha" in combinado
-                                or (a == "codigo" and b in ("empregado", "folha"))):
+        if col_emp is None and (
+            "codigo empregado" in combinado or
+            "codigo folha" in combinado or
+            (a == "codigo" and b in ("empregado", "folha"))
+        ):
             col_emp = col; continue
-        if col_dep is None and ("codigo dependente" in combinado or (a == "codigo" and b == "dependente")):
+        if col_dep is None and (
+            "codigo dependente" in combinado or
+            (a == "codigo" and b == "dependente")
+        ):
             col_dep = col; continue
-        if col_nome is None and ("nome dos colaboradores" in combinado or (a == "nome dos" and b == "colaboradores")):
+        if col_nome is None and (
+            "nome dos colaboradores" in combinado or
+            (a == "nome dos" and b == "colaboradores")
+        ):
             col_nome = col; continue
     col_tipo = col_tipo or 0
     col_emp  = col_emp  or 1
@@ -411,12 +439,12 @@ def processar_bytes(arquivo_bytes, log):
             for col in eventos:
                 cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
 
-        linhas_saida   = []
+        linhas_saida     = []
         ultimo_empregado = ""
-        total_saude    = defaultdict(int)
-        reg10_saude    = {}
-        reg20_saude    = {}
-        reg25_saude    = defaultdict(list)
+        total_saude      = defaultdict(int)
+        reg10_saude      = {}
+        reg20_saude      = {}
+        reg25_saude      = defaultdict(list)
         qtd_normais = qtd_saude = 0
 
         for i in range(linha_dados, len(df)):
@@ -430,12 +458,10 @@ def processar_bytes(arquivo_bytes, log):
 
             if not tpcalc:
                 continue
-
             if cod_emp:
                 ultimo_empregado = cod_emp
             elif cod_dep and ultimo_empregado:
                 cod_emp = ultimo_empregado
-
             if not cod_emp and not cod_dep:
                 continue
 
@@ -462,10 +488,12 @@ def processar_bytes(arquivo_bytes, log):
                     reg20_saude[chave] = montar_registro(layout, "20", {
                         "cnpj_operadora": cnpj_operadora.get(col, ""),
                     })
+                    tipo_ben = "D" if cod_dep else "T"
+                    cod_ben  = cod_dep if cod_dep else cod_emp
                     reg25_saude[chave].append(
                         montar_registro(layout, "25", {
-                            "tipo_beneficiario":   "D" if cod_dep else "T",
-                            "codigo_beneficiario": cod_dep if cod_dep else cod_emp,
+                            "tipo_beneficiario":   tipo_ben,
+                            "codigo_beneficiario": cod_ben,
                             "valor": valor,
                         })
                     )
@@ -485,7 +513,7 @@ def processar_bytes(arquivo_bytes, log):
                     )
                     qtd_normais += 1
 
-        # grava registros de saúde ao final (valor total acumulado)
+        # registros de saúde gravados ao final (valor total acumulado)
         for chave in reg10_saude:
             linhas_saida.append(reg10_saude[chave])
             linhas_saida.append(reg20_saude[chave])
@@ -496,10 +524,7 @@ def processar_bytes(arquivo_bytes, log):
         log.append(f"Eventos saúde   : {qtd_saude}")
         log.append(f"Total de linhas : {len(linhas_saida)}")
 
-        return linhas_saida, {
-            "empresa":    cod_empresa,
-            "competencia": competencia,
-        }
+        return linhas_saida, {"empresa": cod_empresa, "competencia": competencia}
 
     except Exception as e:
         log.append(f"ERRO: {e}")
@@ -518,7 +543,7 @@ def main():
     )
     apply_tr_theme()
 
-    # ---- cabeçalho ----
+    # ---------- cabeçalho ----------
     st.markdown(
         f"""
         <div style="background:#444444; padding:24px 28px 18px 28px; border-radius:8px;
@@ -535,43 +560,84 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ---- sidebar ----
+    # ---------- sidebar ----------
     with st.sidebar:
+        st.markdown("### 📥 Modelos de Planilha")
+        st.markdown(
+            "Baixe o modelo correspondente ao seu tipo de lançamento "
+            "e importe no **Domínio Sistemas**."
+        )
+
+        # ── Sem plano ──────────────────────────────
+        bgr_sem = carregar_bgr_bytes("bgr_base64_sem_plano.txt")
+        if bgr_sem is not None:
+            st.download_button(
+                label="⬇ Relação De Valores — Sem Plano.bgr",
+                data=bgr_sem,
+                file_name="Relação De Valores Para Folha De Pagamento - Sem plano.bgr",
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="btn_bgr_sem_plano",
+            )
+        else:
+            st.info("Modelo 'Sem Plano' indisponível.")
+
+        # ── Com plano ──────────────────────────────
+        bgr_com = carregar_bgr_bytes("bgr_base64_com_plano.txt")
+        if bgr_com is not None:
+            st.download_button(
+                label="⬇ Relação De Valores — Com Plano.bgr",
+                data=bgr_com,
+                file_name="Relação De Valores Para Folha De Pagamento - Com plano.bgr",
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="btn_bgr_com_plano",
+            )
+        else:
+            st.info("Modelo 'Com Plano' indisponível.")
+
+        st.markdown("---")
         st.markdown("### ℹ Sobre")
         st.markdown(f"**Versão:** {VERSAO}")
         st.markdown("**Thomson Reuters**")
         st.markdown("**Domínio Sistemas**")
-        st.markdown("---")
-        st.markdown(
-            "Converte a planilha de eventos (com ou sem plano de saúde) "
-            "para o formato de importação do Domínio Folha."
-        )
 
-    # ---- instruções ----
+    # ---------- instruções ----------
     with st.expander("📖 **Instruções de Uso** — clique para expandir", expanded=False):
         st.markdown(
             """
             <div class="instrucoes-box">
 
-            <h4>🔹 Passo 1 — Preparar a planilha</h4>
-            <p>Use a planilha no formato padrão do Domínio com cabeçalho de duas linhas
-            (Tipo de Cálculo, Código Empregado, Código Dependente, Nome dos Colaboradores
-            e colunas de eventos a partir da coluna D).</p>
+            <h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>
+            <p>No menu lateral, escolha o modelo adequado:</p>
+            <ul>
+                <li><b>Sem Plano</b> → lançamentos sem plano de saúde.</li>
+                <li><b>Com Plano</b> → lançamentos com plano de saúde
+                    (gera registros 10 + 20 + 25).</li>
+            </ul>
 
-            <h4>🔹 Passo 2 — Plano de saúde (opcional)</h4>
-            <p>Se houver eventos de plano de saúde, preencha a linha
-            <b>Evento de Plano de Saúde</b> com <b>Sim</b> nas colunas correspondentes
-            e a linha <b>CNPJ da Operadora</b> com o CNPJ de cada operadora.</p>
-
-            <h4>🔹 Passo 3 — Gerar o TXT</h4>
+            <h4>🔹 Passo 2 — Importar o modelo no Domínio Sistemas</h4>
             <ol>
-                <li>Faça o upload do arquivo Excel.</li>
-                <li>Clique em <b>▶ Gerar arquivo TXT</b>.</li>
-                <li>Baixe o arquivo gerado.</li>
+                <li>Abra o <b>Domínio Sistemas / Folha</b>.</li>
+                <li>Acesse <b>Utilitários → Gerador de Relatórios → Importar</b>.</li>
+                <li>Selecione o arquivo <code>.bgr</code> baixado.</li>
             </ol>
 
-            <h4>🔹 Passo 4 — Importar no Domínio</h4>
-            <p>No módulo Folha: <b>Utilitários → Importação → de Arquivo Texto →
+            <h4>🔹 Passo 3 — Preencher e exportar a planilha</h4>
+            <ol>
+                <li>Execute o relatório no Domínio com a empresa e competência desejadas.</li>
+                <li>Exporte o resultado em formato <b>Excel (.xlsx)</b>.</li>
+            </ol>
+
+            <h4>🔹 Passo 4 — Gerar o arquivo TXT</h4>
+            <ol>
+                <li>Faça o <b>upload</b> do Excel exportado.</li>
+                <li>Clique em <b>▶ Gerar arquivo TXT</b>.</li>
+                <li>Baixe o arquivo gerado com o botão <b>⬇ Baixar arquivo TXT</b>.</li>
+            </ol>
+
+            <h4>🔹 Passo 5 — Importar no Domínio</h4>
+            <p>Folha → <b>Utilitários → Importação → de Arquivo Texto →
             De Lançamentos</b>.</p>
 
             <hr>
@@ -591,7 +657,7 @@ def main():
 
     st.markdown("---")
 
-    # ---- estado ----
+    # ---------- estado ----------
     if "log_conv"  not in st.session_state:
         st.session_state.log_conv  = [f"Aplicação pronta. Versão: {VERSAO}"]
     if "txt_conv"  not in st.session_state:
@@ -599,7 +665,7 @@ def main():
     if "nome_conv" not in st.session_state:
         st.session_state.nome_conv = "Eventos.txt"
 
-    # ---- upload ----
+    # ---------- upload ----------
     arquivo = st.file_uploader(
         "Excel de origem",
         type=["xlsx", "xls"],
@@ -640,7 +706,7 @@ def main():
 
         st.rerun()
 
-    # ---- download ----
+    # ---------- download do TXT ----------
     if st.session_state.txt_conv is not None:
         st.success("✅ Arquivo gerado com sucesso!")
         st.download_button(
@@ -652,7 +718,7 @@ def main():
             type="primary",
         )
 
-    # ---- métricas (só quando há resultado) ----
+    # ---------- métricas ----------
     log = st.session_state.log_conv
     normais = saude = total = None
     for linha in log:
@@ -668,11 +734,11 @@ def main():
 
     if normais is not None:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Eventos normais",  normais)
-        c2.metric("Eventos saúde",    saude)
-        c3.metric("Total de linhas",  total)
+        c1.metric("Eventos normais", normais)
+        c2.metric("Eventos saúde",   saude)
+        c3.metric("Total de linhas", total)
 
-    # ---- log ----
+    # ---------- log ----------
     st.markdown("**Log de processamento**")
     log_texto = "\n".join(log)
     tem_erro  = any(str(l).startswith("ERRO") for l in log)
