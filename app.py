@@ -212,14 +212,15 @@ def valor_para_layout(v, tamanho=9):
 # LEIAUTES
 # ==============================
 LEIAUTES = {
+    # -------------------------------------------------------
+    # LEIAUTE 1 — Original (horizontal, eventos em colunas)
+    # NADA alterado aqui
+    # -------------------------------------------------------
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
         "detector": {
-            # Marcadores exclusivos do leiaute HORIZONTAL (colunas de eventos)
             "cabecalho": ["tipo de", "codigo", "competencia", "codigo empresa"],
             "marcadores": ["folha", "colaboradores"],
-            # Marcador negativo: NÃO deve ter "descricao rubrica" nem "referencia valor"
-            "ausentes":   ["descricao rubrica", "referencia valor", "descricao", "rubrica"],
         },
         "registros": {
             "10": [
@@ -245,16 +246,17 @@ LEIAUTES = {
     },
 
     # -------------------------------------------------------
-    # NOVO LEIAUTE — Relação de Valores V2 (estrutura vertical)
+    # LEIAUTE 2 — Relação de Valores V2 (vertical)
+    # Cada linha = um evento. Rubrica lida da coluna "Código Rubrica".
+    # Aceita .xls e .xlsx.
     # -------------------------------------------------------
     "relacao_valores_vertical": {
         "nome": "Relação de Valores Para Folha de Pagamento V2 | Vertical",
         "detector": {
-            # Marcadores que aparecem APENAS neste leiaute
-            "cabecalho": ["relacao de valores", "codigo empresa", "competencia"],
-            "marcadores": ["descricao rubrica", "codigo rubrica", "referencia"],
-            # Neste leiaute NÃO há colunas de eventos no header
-            "ausentes":   [],
+            # Marcador exclusivo deste leiaute: título na célula A1
+            "cabecalho": ["relacao de valores para folha de pagamento"],
+            # Colunas fixas características deste leiaute
+            "marcadores": ["codigo rubrica", "descricao rubrica", "referencia"],
         },
         "registros": {
             "10": [
@@ -276,9 +278,13 @@ LEIAUTES = {
 # ==============================
 def detectar_leiaute(df):
     """
-    Varre todas as células do DataFrame e pontua cada leiaute registrado.
-    Usa marcadores positivos (+score) e marcadores ausentes (-penalidade).
-    Retorna a chave do leiaute com maior score.
+    Varre todas as células do DataFrame, normaliza o texto e pontua
+    cada leiaute pelos seus marcadores.
+
+    Estratégia de desempate:
+      - O Leiaute 2 tem o marcador "relacao de valores para folha de pagamento"
+        que é o título da célula A1 — altamente específico.
+      - O Leiaute 1 NÃO possui esse título, portanto os scores nunca colidem.
     """
     conteudo = []
     for i in range(len(df)):
@@ -299,17 +305,15 @@ def detectar_leiaute(df):
 
         for t in det.get("marcadores", []):
             if t in texto_total:
-                score += 3          # peso maior para marcadores específicos
-
-        for t in det.get("ausentes", []):
-            if t in texto_total:
-                score -= 2          # penaliza se marcador "negativo" estiver presente
+                score += 3   # peso maior para marcadores de coluna específicos
 
         if score > melhor_score:
             melhor_score, melhor = score, chave
 
     if not melhor or melhor_score <= 0:
-        raise ValueError("Não foi possível identificar automaticamente o leiaute da planilha.")
+        raise ValueError(
+            "Não foi possível identificar automaticamente o leiaute da planilha."
+        )
     return melhor
 
 
@@ -341,7 +345,7 @@ def montar_registro(layout, tipo_registro, dados):
 
 
 # ==============================
-# LEITURA EXCEL
+# LEITURA EXCEL  (.xlsx e .xls)
 # ==============================
 def carregar_excel(arquivo_bytes):
     try:
@@ -354,20 +358,30 @@ def carregar_excel(arquivo_bytes):
 
 
 # ==============================
-# METADADOS — compartilhado entre leiautes
+# METADADOS — compartilhado
 # ==============================
 def localizar_metadados(df):
+    """
+    Funciona para ambos os leiautes:
+      - Leiaute 1: "Codigo Empresa" aparece numa célula, valor na próxima.
+      - Leiaute 2: "Codigo Empresa:" na col-A, valor na col-C (índice 2).
+    A varredura genérica por linha cobre os dois casos.
+    """
     cod_empresa = competencia = ""
     for i in range(len(df)):
         row = df.iloc[i].tolist()
         row_norm = [normalizar(x) for x in row]
         for j, cel in enumerate(row_norm):
+            # --- empresa ---
             if cel in ("codigo empresa:", "codigo empresa"):
+                # tenta célula imediatamente à direita primeiro,
+                # depois qualquer célula não vazia na mesma linha
                 for k in range(j + 1, len(row)):
                     num = so_numeros(row[k])
                     if num:
                         cod_empresa = num.zfill(10)
                         break
+            # --- competência ---
             if cel in ("competencia:", "competencia"):
                 for k in range(j + 1, len(row)):
                     comp = competencia_yyyymm(row[k])
@@ -378,7 +392,8 @@ def localizar_metadados(df):
 
 
 # ==============================
-# LEIAUTE 1 — funções exclusivas (horizontal)
+# LEIAUTE 1 — funções exclusivas
+# (código 100% idêntico ao V1.0)
 # ==============================
 def localizar_estrutura(df):
     cab1 = cab2 = linha_plano = linha_cnpj = linha_dados = None
@@ -456,7 +471,7 @@ def detectar_colunas(df, cab1, cab2):
 
 
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
-    """Processa o leiaute original (horizontal — eventos em colunas)."""
+    """Leiaute 1 — lógica 100% idêntica ao V1.0, apenas isolada em função."""
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
     if cab1 is None or cab2 is None:
         raise ValueError("Cabeçalho da planilha não encontrado.")
@@ -513,7 +528,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
             if plano_saude.get(col, False):
                 chave = (cod_emp, cod_evt, tpcalc or "11")
                 total_saude[chave] += int(valor)
-
                 reg10_saude[chave] = montar_registro(layout, "10", {
                     "empregado":   cod_emp,
                     "competencia": competencia,
@@ -535,7 +549,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                     })
                 )
                 qtd_saude += 1
-
             else:
                 linhas_saida.append(
                     montar_registro(layout, "10", {
@@ -559,111 +572,107 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
 
 
 # ==============================
-# LEIAUTE 2 — funções exclusivas (vertical)
+# LEIAUTE 2 — funções exclusivas
 # ==============================
 def localizar_cabecalho_vertical(df):
     """
-    Localiza a linha de cabeçalho do leiaute vertical buscando pelas
-    colunas características: 'tipo de', 'codigo folha', 'codigo rubrica',
-    'descricao rubrica', 'referencia' / 'valor'.
-    Retorna o índice da linha de dados (primeira linha após o cabeçalho completo)
-    e um dicionário com os índices de cada coluna necessária.
+    Localiza as duas linhas de cabeçalho do Leiaute 2.
+
+    Estrutura real do arquivo (baseada no .xls fornecido):
+      Linha cab1 → col0:"Tipo de"  col1:"Código"  col2:"Nome dos"  col3:"Código"   col4:"Descrição"  col5:"Referência"
+      Linha cab2 → col0:"Calculo"  col1:"Folha"   col2:"Colaboradores" col3:"Rubrica" col4:"Rubrica"  col5:"Valor"
+
+    A rubrica de cada evento vem da coluna "Código Rubrica" (col3 no exemplo),
+    não de um cabeçalho horizontal — esse é o ponto central deste leiaute.
+
+    Retorna: (linha_dados, dict_colunas)
+      linha_dados  → índice da primeira linha de dados
+      dict_colunas → {col_tipo, col_emp, col_rubrica, col_valor}
     """
-    # O cabeçalho pode estar dividido em duas linhas (como no leiaute 1),
-    # então verificamos pares de linhas consecutivas.
     for i in range(len(df) - 1):
         linha_a = [normalizar(x) for x in df.iloc[i].tolist()]
         linha_b = [normalizar(x) for x in df.iloc[i + 1].tolist()]
 
+        # Combina as duas linhas célula a célula para detectar cabeçalhos duplos
         combinadas = [f"{a} {b}".strip() for a, b in zip(linha_a, linha_b)]
 
-        col_tipo = col_emp = col_nome = col_rubrica = col_desc = col_valor = None
+        col_tipo    = None
+        col_emp     = None
+        col_rubrica = None
+        col_valor   = None
 
         for col, comb in enumerate(combinadas):
             a = linha_a[col]
             b = linha_b[col]
 
             if col_tipo is None and (
-                "tipo de calculo" in comb or
-                (a == "tipo de" and b == "calculo")
+                "tipo de calculo" in comb
+                or (a == "tipo de" and b == "calculo")
             ):
                 col_tipo = col
                 continue
 
             if col_emp is None and (
-                "codigo folha" in comb or
-                "codigo empregado" in comb or
-                (a == "codigo" and b in ("folha", "empregado"))
+                "codigo folha" in comb
+                or "codigo empregado" in comb
+                or (a == "codigo" and b in ("folha", "empregado"))
             ):
                 col_emp = col
                 continue
 
-            if col_nome is None and (
-                "nome dos colaboradores" in comb or
-                (a == "nome dos" and b == "colaboradores")
-            ):
-                col_nome = col
-                continue
-
+            # "Código Rubrica" — marcador principal do Leiaute 2
             if col_rubrica is None and (
-                "codigo rubrica" in comb or
-                (a == "codigo" and b == "rubrica")
+                "codigo rubrica" in comb
+                or (a == "codigo" and b == "rubrica")
             ):
                 col_rubrica = col
                 continue
 
-            if col_desc is None and (
-                "descricao rubrica" in comb or
-                (a == "descricao" and b == "rubrica")
-            ):
-                col_desc = col
-                continue
-
+            # "Referência Valor" ou só "Referência" / "Valor"
             if col_valor is None and (
-                "referencia valor" in comb or
-                "referencia" in comb or
-                b in ("valor", "referencia") or
-                a in ("referencia", "valor")
+                "referencia valor" in comb
+                or "referencia" in comb
+                or b in ("valor", "referencia")
+                or a in ("referencia", "valor")
             ):
                 col_valor = col
                 continue
 
-        # Considera encontrado se tiver pelo menos tipo + empregado + rubrica + valor
+        # Cabeçalho válido: precisa de tipo + empregado + rubrica + valor
         if None not in (col_tipo, col_emp, col_rubrica, col_valor):
-            colunas = {
+            return i + 2, {          # i+2 → pula as duas linhas de cabeçalho
                 "col_tipo":    col_tipo,
                 "col_emp":     col_emp,
-                "col_nome":    col_nome,
                 "col_rubrica": col_rubrica,
-                "col_desc":    col_desc,
                 "col_valor":   col_valor,
             }
-            linha_dados = i + 2  # pula as duas linhas de cabeçalho
-            return linha_dados, colunas
 
-    raise ValueError("Cabeçalho do leiaute vertical não encontrado.")
+    raise ValueError(
+        "Cabeçalho do Leiaute V2 não encontrado. "
+        "Verifique se as colunas 'Código Rubrica' e 'Referência/Valor' estão presentes."
+    )
 
 
 def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     """
-    Processa o leiaute V2 (vertical — cada linha é um evento de um colaborador).
-    Ignora linhas com valor vazio ou zero.
-    Gera apenas Registro 10 (sem plano de saúde neste leiaute).
+    Leiaute 2 — cada linha da planilha é um evento de um colaborador.
+    A rubrica vem da coluna 'Código Rubrica' (não do cabeçalho horizontal).
+    Gera apenas Registro 10. Linhas com valor vazio ou zero são ignoradas.
     """
     linha_dados, cols = localizar_cabecalho_vertical(df)
 
     col_tipo    = cols["col_tipo"]
     col_emp     = cols["col_emp"]
-    col_rubrica = cols["col_rubrica"]
+    col_rubrica = cols["col_rubrica"]   # ← ponto central do Leiaute 2
     col_valor   = cols["col_valor"]
 
     log.append(
-        f"Colunas detectadas → tipo:{col_tipo} | emp:{col_emp} "
-        f"| rubrica:{col_rubrica} | valor:{col_valor}"
+        f"Colunas detectadas → "
+        f"tipo:{col_tipo} | emp:{col_emp} | rubrica:{col_rubrica} | valor:{col_valor}"
     )
 
-    linhas_saida = []
-    qtd_normais  = 0
+    linhas_saida  = []
+    qtd_normais   = 0
     qtd_ignoradas = 0
 
     for i in range(linha_dados, len(df)):
@@ -673,6 +682,7 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
 
         tpcalc  = so_numeros(row[col_tipo])    if col_tipo    < len(row) else ""
         cod_emp = so_numeros(row[col_emp])     if col_emp     < len(row) else ""
+        # Rubrica lida diretamente da célula da linha — diferencial do Leiaute 2
         rubrica = so_numeros(row[col_rubrica]) if col_rubrica < len(row) else ""
         valor   = valor_para_layout(row[col_valor], 9) if col_valor < len(row) else ""
 
@@ -680,7 +690,7 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
         if not tpcalc or not cod_emp:
             continue
 
-        # Ignora linhas sem rubrica
+        # Ignora linhas sem código de rubrica
         if not rubrica:
             continue
 
@@ -704,7 +714,7 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     if qtd_ignoradas:
         log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
 
-    return linhas_saida, qtd_normais, 0   # 0 eventos saúde (não suportado neste leiaute)
+    return linhas_saida, qtd_normais, 0   # 0 = sem eventos de saúde neste leiaute
 
 
 # ==============================
@@ -725,7 +735,7 @@ def processar_bytes(arquivo_bytes, log):
             raise ValueError("Competência não encontrada.")
         log.append(f"Empresa: {cod_empresa}  |  Competência: {competencia}")
 
-        # ── Roteamento por leiaute ──────────────────────────────────────────
+        # ── Roteamento por leiaute detectado ───────────────────────────────
         if leiaute_chave == "importacao_arquivo_texto_lancamentos":
             linhas_saida, qtd_normais, qtd_saude = processar_leiaute_horizontal(
                 df, layout, cod_empresa, competencia, log
@@ -829,10 +839,14 @@ def main():
 
             <h4>🔹 Leiautes suportados</h4>
             <ul>
-                <li><b>Leiaute 1 — Horizontal</b>: eventos em colunas, gerado pelo Domínio via .bgr.</li>
-                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento; colunas fixas
-                    Tipo de Cálculo | Código Folha | Nome | Código Rubrica | Descrição | Referência/Valor.
-                    Aceita <code>.xls</code> e <code>.xlsx</code>.</li>
+                <li><b>Leiaute 1 — Horizontal</b>: eventos em colunas, gerado pelo
+                    Domínio via <code>.bgr</code>. Suporta plano de saúde
+                    (registros 10 + 20 + 25).</li>
+                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento;
+                    colunas fixas <em>Tipo de Cálculo | Código Folha | Nome |
+                    Código Rubrica | Descrição Rubrica | Referência/Valor</em>.
+                    Aceita <code>.xls</code> e <code>.xlsx</code>.
+                    Gera apenas Registro 10.</li>
             </ul>
             <p>O sistema identifica o leiaute <b>automaticamente</b> ao carregar o arquivo.</p>
 
@@ -872,8 +886,8 @@ def main():
 
             <h4>⚠ Observações</h4>
             <ul>
-                <li>Eventos de plano de saúde (Leiaute 1) geram registros <b>10 + 20 + 25</b>
-                    com valor acumulado (titular + dependentes).</li>
+                <li>Eventos de plano de saúde (Leiaute 1) geram registros
+                    <b>10 + 20 + 25</b> com valor acumulado (titular + dependentes).</li>
                 <li>Eventos normais geram apenas o registro <b>10</b>.</li>
                 <li>Linhas com <b>valor vazio ou zero</b> são ignoradas automaticamente.</li>
                 <li>O arquivo de saída é codificado em <b>UTF-8</b>.</li>
@@ -898,8 +912,11 @@ def main():
     arquivo = st.file_uploader(
         "Excel de origem (.xlsx ou .xls)",
         type=["xlsx", "xls"],
-        help="Planilha de eventos — Leiaute 1 (horizontal) ou Leiaute 2 V2 (vertical). "
-             "O formato é detectado automaticamente.",
+        help=(
+            "Leiaute 1 (horizontal, eventos em colunas) ou "
+            "Leiaute 2 V2 (vertical, uma linha por evento). "
+            "O formato é detectado automaticamente."
+        ),
     )
 
     col1, col2 = st.columns([1, 1])
