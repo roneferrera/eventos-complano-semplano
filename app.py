@@ -10,7 +10,7 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.0"
+VERSAO = "V1.1"
 
 # ==============================
 # TEMA TR (espelho do RPA)
@@ -215,8 +215,11 @@ LEIAUTES = {
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
         "detector": {
+            # Marcadores exclusivos do leiaute HORIZONTAL (colunas de eventos)
             "cabecalho": ["tipo de", "codigo", "competencia", "codigo empresa"],
             "marcadores": ["folha", "colaboradores"],
+            # Marcador negativo: NÃO deve ter "descricao rubrica" nem "referencia valor"
+            "ausentes":   ["descricao rubrica", "referencia valor", "descricao", "rubrica"],
         },
         "registros": {
             "10": [
@@ -239,11 +242,44 @@ LEIAUTES = {
                 ("valor",               9),
             ],
         },
-    }
+    },
+
+    # -------------------------------------------------------
+    # NOVO LEIAUTE — Relação de Valores V2 (estrutura vertical)
+    # -------------------------------------------------------
+    "relacao_valores_vertical": {
+        "nome": "Relação de Valores Para Folha de Pagamento V2 | Vertical",
+        "detector": {
+            # Marcadores que aparecem APENAS neste leiaute
+            "cabecalho": ["relacao de valores", "codigo empresa", "competencia"],
+            "marcadores": ["descricao rubrica", "codigo rubrica", "referencia"],
+            # Neste leiaute NÃO há colunas de eventos no header
+            "ausentes":   [],
+        },
+        "registros": {
+            "10": [
+                ("fixo",        2,  "10"),
+                ("empregado",  10),
+                ("competencia", 6),
+                ("rubrica",     9),
+                ("tpcalc",      2),
+                ("valor",       9),
+                ("empresa",    10),
+            ],
+        },
+    },
 }
 
 
+# ==============================
+# DETECÇÃO DE LEIAUTE
+# ==============================
 def detectar_leiaute(df):
+    """
+    Varre todas as células do DataFrame e pontua cada leiaute registrado.
+    Usa marcadores positivos (+score) e marcadores ausentes (-penalidade).
+    Retorna a chave do leiaute com maior score.
+    """
     conteudo = []
     for i in range(len(df)):
         for x in df.iloc[i].tolist():
@@ -251,23 +287,35 @@ def detectar_leiaute(df):
             if t:
                 conteudo.append(t)
     texto_total = " | ".join(conteudo)
+
     melhor, melhor_score = None, -1
     for chave, layout in LEIAUTES.items():
         score = 0
         det = layout.get("detector", {})
+
         for t in det.get("cabecalho", []):
             if t in texto_total:
                 score += 2
+
         for t in det.get("marcadores", []):
             if t in texto_total:
-                score += 1
+                score += 3          # peso maior para marcadores específicos
+
+        for t in det.get("ausentes", []):
+            if t in texto_total:
+                score -= 2          # penaliza se marcador "negativo" estiver presente
+
         if score > melhor_score:
             melhor_score, melhor = score, chave
+
     if not melhor or melhor_score <= 0:
         raise ValueError("Não foi possível identificar automaticamente o leiaute da planilha.")
     return melhor
 
 
+# ==============================
+# UTILITÁRIOS DE LAYOUT
+# ==============================
 def ajustar_campo_layout(nome, valor, tamanho):
     valor = "" if valor is None else str(valor)
     if nome in ("empregado", "empresa", "codigo_beneficiario"):
@@ -305,6 +353,9 @@ def carregar_excel(arquivo_bytes):
     return df.fillna("")
 
 
+# ==============================
+# METADADOS — compartilhado entre leiautes
+# ==============================
 def localizar_metadados(df):
     cod_empresa = competencia = ""
     for i in range(len(df)):
@@ -326,6 +377,9 @@ def localizar_metadados(df):
     return cod_empresa, competencia
 
 
+# ==============================
+# LEIAUTE 1 — funções exclusivas (horizontal)
+# ==============================
 def localizar_estrutura(df):
     cab1 = cab2 = linha_plano = linha_cnpj = linha_dados = None
     for i in range(len(df)):
@@ -401,6 +455,258 @@ def detectar_colunas(df, cab1, cab2):
     return col_tipo, col_emp, col_dep, col_nome, eventos
 
 
+def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
+    """Processa o leiaute original (horizontal — eventos em colunas)."""
+    cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
+    if cab1 is None or cab2 is None:
+        raise ValueError("Cabeçalho da planilha não encontrado.")
+    if linha_dados is None:
+        raise ValueError("Linhas de dados não encontradas.")
+
+    col_tipo, col_emp, col_dep, col_nome, eventos = detectar_colunas(df, cab1, cab2)
+    if not eventos:
+        raise ValueError("Nenhum evento foi identificado no cabeçalho.")
+    log.append(f"Colunas de eventos detectadas: {len(eventos)}")
+
+    plano_saude    = {}
+    cnpj_operadora = {}
+    if linha_plano is not None:
+        for col in eventos:
+            plano_saude[col] = eh_sim(df.iloc[linha_plano, col])
+    if linha_cnpj is not None:
+        for col in eventos:
+            cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
+
+    linhas_saida     = []
+    ultimo_empregado = ""
+    total_saude      = defaultdict(int)
+    reg10_saude      = {}
+    reg20_saude      = {}
+    reg25_saude      = defaultdict(list)
+    qtd_normais = qtd_saude = 0
+
+    for i in range(linha_dados, len(df)):
+        row = df.iloc[i].tolist()
+        if linha_vazia(row):
+            continue
+
+        tpcalc  = so_numeros(row[col_tipo]) if col_tipo < len(row) else ""
+        cod_emp = so_numeros(row[col_emp])  if col_emp  < len(row) else ""
+        cod_dep = so_numeros(row[col_dep])  if col_dep  < len(row) else ""
+
+        if not tpcalc:
+            continue
+        if cod_emp:
+            ultimo_empregado = cod_emp
+        elif cod_dep and ultimo_empregado:
+            cod_emp = ultimo_empregado
+        if not cod_emp and not cod_dep:
+            continue
+
+        for col, cod_evt in eventos.items():
+            if col >= len(row):
+                continue
+            valor = valor_para_layout(row[col], 9)
+            if not valor or int(valor) == 0:
+                continue
+
+            if plano_saude.get(col, False):
+                chave = (cod_emp, cod_evt, tpcalc or "11")
+                total_saude[chave] += int(valor)
+
+                reg10_saude[chave] = montar_registro(layout, "10", {
+                    "empregado":   cod_emp,
+                    "competencia": competencia,
+                    "rubrica":     cod_evt,
+                    "tpcalc":      tpcalc or "11",
+                    "valor":       str(total_saude[chave]).zfill(9),
+                    "empresa":     cod_empresa,
+                })
+                reg20_saude[chave] = montar_registro(layout, "20", {
+                    "cnpj_operadora": cnpj_operadora.get(col, ""),
+                })
+                tipo_ben = "D" if cod_dep else "T"
+                cod_ben  = cod_dep if cod_dep else cod_emp
+                reg25_saude[chave].append(
+                    montar_registro(layout, "25", {
+                        "tipo_beneficiario":   tipo_ben,
+                        "codigo_beneficiario": cod_ben,
+                        "valor": valor,
+                    })
+                )
+                qtd_saude += 1
+
+            else:
+                linhas_saida.append(
+                    montar_registro(layout, "10", {
+                        "empregado":   cod_emp,
+                        "competencia": competencia,
+                        "rubrica":     cod_evt,
+                        "tpcalc":      tpcalc or "11",
+                        "valor":       valor,
+                        "empresa":     cod_empresa,
+                    })
+                )
+                qtd_normais += 1
+
+    for chave in reg10_saude:
+        linhas_saida.append(reg10_saude[chave])
+        linhas_saida.append(reg20_saude[chave])
+        for r25 in reg25_saude[chave]:
+            linhas_saida.append(r25)
+
+    return linhas_saida, qtd_normais, qtd_saude
+
+
+# ==============================
+# LEIAUTE 2 — funções exclusivas (vertical)
+# ==============================
+def localizar_cabecalho_vertical(df):
+    """
+    Localiza a linha de cabeçalho do leiaute vertical buscando pelas
+    colunas características: 'tipo de', 'codigo folha', 'codigo rubrica',
+    'descricao rubrica', 'referencia' / 'valor'.
+    Retorna o índice da linha de dados (primeira linha após o cabeçalho completo)
+    e um dicionário com os índices de cada coluna necessária.
+    """
+    # O cabeçalho pode estar dividido em duas linhas (como no leiaute 1),
+    # então verificamos pares de linhas consecutivas.
+    for i in range(len(df) - 1):
+        linha_a = [normalizar(x) for x in df.iloc[i].tolist()]
+        linha_b = [normalizar(x) for x in df.iloc[i + 1].tolist()]
+
+        combinadas = [f"{a} {b}".strip() for a, b in zip(linha_a, linha_b)]
+
+        col_tipo = col_emp = col_nome = col_rubrica = col_desc = col_valor = None
+
+        for col, comb in enumerate(combinadas):
+            a = linha_a[col]
+            b = linha_b[col]
+
+            if col_tipo is None and (
+                "tipo de calculo" in comb or
+                (a == "tipo de" and b == "calculo")
+            ):
+                col_tipo = col
+                continue
+
+            if col_emp is None and (
+                "codigo folha" in comb or
+                "codigo empregado" in comb or
+                (a == "codigo" and b in ("folha", "empregado"))
+            ):
+                col_emp = col
+                continue
+
+            if col_nome is None and (
+                "nome dos colaboradores" in comb or
+                (a == "nome dos" and b == "colaboradores")
+            ):
+                col_nome = col
+                continue
+
+            if col_rubrica is None and (
+                "codigo rubrica" in comb or
+                (a == "codigo" and b == "rubrica")
+            ):
+                col_rubrica = col
+                continue
+
+            if col_desc is None and (
+                "descricao rubrica" in comb or
+                (a == "descricao" and b == "rubrica")
+            ):
+                col_desc = col
+                continue
+
+            if col_valor is None and (
+                "referencia valor" in comb or
+                "referencia" in comb or
+                b in ("valor", "referencia") or
+                a in ("referencia", "valor")
+            ):
+                col_valor = col
+                continue
+
+        # Considera encontrado se tiver pelo menos tipo + empregado + rubrica + valor
+        if None not in (col_tipo, col_emp, col_rubrica, col_valor):
+            colunas = {
+                "col_tipo":    col_tipo,
+                "col_emp":     col_emp,
+                "col_nome":    col_nome,
+                "col_rubrica": col_rubrica,
+                "col_desc":    col_desc,
+                "col_valor":   col_valor,
+            }
+            linha_dados = i + 2  # pula as duas linhas de cabeçalho
+            return linha_dados, colunas
+
+    raise ValueError("Cabeçalho do leiaute vertical não encontrado.")
+
+
+def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
+    """
+    Processa o leiaute V2 (vertical — cada linha é um evento de um colaborador).
+    Ignora linhas com valor vazio ou zero.
+    Gera apenas Registro 10 (sem plano de saúde neste leiaute).
+    """
+    linha_dados, cols = localizar_cabecalho_vertical(df)
+
+    col_tipo    = cols["col_tipo"]
+    col_emp     = cols["col_emp"]
+    col_rubrica = cols["col_rubrica"]
+    col_valor   = cols["col_valor"]
+
+    log.append(
+        f"Colunas detectadas → tipo:{col_tipo} | emp:{col_emp} "
+        f"| rubrica:{col_rubrica} | valor:{col_valor}"
+    )
+
+    linhas_saida = []
+    qtd_normais  = 0
+    qtd_ignoradas = 0
+
+    for i in range(linha_dados, len(df)):
+        row = df.iloc[i].tolist()
+        if linha_vazia(row):
+            continue
+
+        tpcalc  = so_numeros(row[col_tipo])    if col_tipo    < len(row) else ""
+        cod_emp = so_numeros(row[col_emp])     if col_emp     < len(row) else ""
+        rubrica = so_numeros(row[col_rubrica]) if col_rubrica < len(row) else ""
+        valor   = valor_para_layout(row[col_valor], 9) if col_valor < len(row) else ""
+
+        # Ignora linhas sem tipo de cálculo ou sem código de empregado
+        if not tpcalc or not cod_emp:
+            continue
+
+        # Ignora linhas sem rubrica
+        if not rubrica:
+            continue
+
+        # Ignora linhas com valor vazio ou zero
+        if not valor or int(valor) == 0:
+            qtd_ignoradas += 1
+            continue
+
+        linhas_saida.append(
+            montar_registro(layout, "10", {
+                "empregado":   cod_emp,
+                "competencia": competencia,
+                "rubrica":     rubrica,
+                "tpcalc":      tpcalc,
+                "valor":       valor,
+                "empresa":     cod_empresa,
+            })
+        )
+        qtd_normais += 1
+
+    if qtd_ignoradas:
+        log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
+
+    return linhas_saida, qtd_normais, 0   # 0 eventos saúde (não suportado neste leiaute)
+
+
 # ==============================
 # PROCESSAMENTO PRINCIPAL
 # ==============================
@@ -419,106 +725,20 @@ def processar_bytes(arquivo_bytes, log):
             raise ValueError("Competência não encontrada.")
         log.append(f"Empresa: {cod_empresa}  |  Competência: {competencia}")
 
-        cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
-        if cab1 is None or cab2 is None:
-            raise ValueError("Cabeçalho da planilha não encontrado.")
-        if linha_dados is None:
-            raise ValueError("Linhas de dados não encontradas.")
+        # ── Roteamento por leiaute ──────────────────────────────────────────
+        if leiaute_chave == "importacao_arquivo_texto_lancamentos":
+            linhas_saida, qtd_normais, qtd_saude = processar_leiaute_horizontal(
+                df, layout, cod_empresa, competencia, log
+            )
 
-        col_tipo, col_emp, col_dep, col_nome, eventos = detectar_colunas(df, cab1, cab2)
-        if not eventos:
-            raise ValueError("Nenhum evento foi identificado no cabeçalho.")
-        log.append(f"Colunas de eventos detectadas: {len(eventos)}")
+        elif leiaute_chave == "relacao_valores_vertical":
+            linhas_saida, qtd_normais, qtd_saude = processar_leiaute_vertical(
+                df, layout, cod_empresa, competencia, log
+            )
 
-        plano_saude    = {}
-        cnpj_operadora = {}
-        if linha_plano is not None:
-            for col in eventos:
-                plano_saude[col] = eh_sim(df.iloc[linha_plano, col])
-        if linha_cnpj is not None:
-            for col in eventos:
-                cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
-
-        linhas_saida     = []
-        ultimo_empregado = ""
-        total_saude      = defaultdict(int)
-        reg10_saude      = {}
-        reg20_saude      = {}
-        reg25_saude      = defaultdict(list)
-        qtd_normais = qtd_saude = 0
-
-        for i in range(linha_dados, len(df)):
-            row = df.iloc[i].tolist()
-            if linha_vazia(row):
-                continue
-
-            tpcalc  = so_numeros(row[col_tipo]) if col_tipo < len(row) else ""
-            cod_emp = so_numeros(row[col_emp])  if col_emp  < len(row) else ""
-            cod_dep = so_numeros(row[col_dep])  if col_dep  < len(row) else ""
-
-            if not tpcalc:
-                continue
-            if cod_emp:
-                ultimo_empregado = cod_emp
-            elif cod_dep and ultimo_empregado:
-                cod_emp = ultimo_empregado
-            if not cod_emp and not cod_dep:
-                continue
-
-            for col, cod_evt in eventos.items():
-                if col >= len(row):
-                    continue
-                valor = valor_para_layout(row[col], 9)
-                if not valor or int(valor) == 0:
-                    continue
-
-                if plano_saude.get(col, False):
-                    # ---- plano de saúde ----
-                    chave = (cod_emp, cod_evt, tpcalc or "11")
-                    total_saude[chave] += int(valor)
-
-                    reg10_saude[chave] = montar_registro(layout, "10", {
-                        "empregado":   cod_emp,
-                        "competencia": competencia,
-                        "rubrica":     cod_evt,
-                        "tpcalc":      tpcalc or "11",
-                        "valor":       str(total_saude[chave]).zfill(9),
-                        "empresa":     cod_empresa,
-                    })
-                    reg20_saude[chave] = montar_registro(layout, "20", {
-                        "cnpj_operadora": cnpj_operadora.get(col, ""),
-                    })
-                    tipo_ben = "D" if cod_dep else "T"
-                    cod_ben  = cod_dep if cod_dep else cod_emp
-                    reg25_saude[chave].append(
-                        montar_registro(layout, "25", {
-                            "tipo_beneficiario":   tipo_ben,
-                            "codigo_beneficiario": cod_ben,
-                            "valor": valor,
-                        })
-                    )
-                    qtd_saude += 1
-
-                else:
-                    # ---- evento normal ----
-                    linhas_saida.append(
-                        montar_registro(layout, "10", {
-                            "empregado":   cod_emp,
-                            "competencia": competencia,
-                            "rubrica":     cod_evt,
-                            "tpcalc":      tpcalc or "11",
-                            "valor":       valor,
-                            "empresa":     cod_empresa,
-                        })
-                    )
-                    qtd_normais += 1
-
-        # registros de saúde gravados ao final (valor total acumulado)
-        for chave in reg10_saude:
-            linhas_saida.append(reg10_saude[chave])
-            linhas_saida.append(reg20_saude[chave])
-            for r25 in reg25_saude[chave]:
-                linhas_saida.append(r25)
+        else:
+            raise ValueError(f"Leiaute '{leiaute_chave}' sem processador definido.")
+        # ───────────────────────────────────────────────────────────────────
 
         log.append(f"Eventos normais : {qtd_normais}")
         log.append(f"Eventos saúde   : {qtd_saude}")
@@ -554,6 +774,7 @@ def main():
             <p style="color:#DDDDDD; margin:6px 0 0 0; font-family:'Segoe UI',Arial,sans-serif;">
                 Selecione o Excel de origem e clique em
                 <strong>Gerar arquivo TXT</strong>.
+                O leiaute é identificado <b>automaticamente</b>.
             </p>
         </div>
         """,
@@ -568,7 +789,6 @@ def main():
             "e importe no **Domínio Sistemas**."
         )
 
-        # ── Sem plano ──────────────────────────────
         bgr_sem = carregar_bgr_bytes("bgr_base64_sem_plano.txt")
         if bgr_sem is not None:
             st.download_button(
@@ -582,7 +802,6 @@ def main():
         else:
             st.info("Modelo 'Sem Plano' indisponível.")
 
-        # ── Com plano ──────────────────────────────
         bgr_com = carregar_bgr_bytes("bgr_base64_com_plano.txt")
         if bgr_com is not None:
             st.download_button(
@@ -608,6 +827,15 @@ def main():
             """
             <div class="instrucoes-box">
 
+            <h4>🔹 Leiautes suportados</h4>
+            <ul>
+                <li><b>Leiaute 1 — Horizontal</b>: eventos em colunas, gerado pelo Domínio via .bgr.</li>
+                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento; colunas fixas
+                    Tipo de Cálculo | Código Folha | Nome | Código Rubrica | Descrição | Referência/Valor.
+                    Aceita <code>.xls</code> e <code>.xlsx</code>.</li>
+            </ul>
+            <p>O sistema identifica o leiaute <b>automaticamente</b> ao carregar o arquivo.</p>
+
             <h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>
             <p>No menu lateral, escolha o modelo adequado:</p>
             <ul>
@@ -626,7 +854,7 @@ def main():
             <h4>🔹 Passo 3 — Preencher e exportar a planilha</h4>
             <ol>
                 <li>Execute o relatório no Domínio com a empresa e competência desejadas.</li>
-                <li>Exporte o resultado em formato <b>Excel (.xlsx)</b>.</li>
+                <li>Exporte o resultado em formato <b>Excel (.xlsx ou .xls)</b>.</li>
             </ol>
 
             <h4>🔹 Passo 4 — Gerar o arquivo TXT</h4>
@@ -644,9 +872,10 @@ def main():
 
             <h4>⚠ Observações</h4>
             <ul>
-                <li>Eventos de plano de saúde geram registros <b>10 + 20 + 25</b>
+                <li>Eventos de plano de saúde (Leiaute 1) geram registros <b>10 + 20 + 25</b>
                     com valor acumulado (titular + dependentes).</li>
                 <li>Eventos normais geram apenas o registro <b>10</b>.</li>
+                <li>Linhas com <b>valor vazio ou zero</b> são ignoradas automaticamente.</li>
                 <li>O arquivo de saída é codificado em <b>UTF-8</b>.</li>
             </ul>
 
@@ -667,9 +896,10 @@ def main():
 
     # ---------- upload ----------
     arquivo = st.file_uploader(
-        "Excel de origem",
+        "Excel de origem (.xlsx ou .xls)",
         type=["xlsx", "xls"],
-        help="Planilha de eventos no formato padrão do Domínio Sistemas",
+        help="Planilha de eventos — Leiaute 1 (horizontal) ou Leiaute 2 V2 (vertical). "
+             "O formato é detectado automaticamente.",
     )
 
     col1, col2 = st.columns([1, 1])
