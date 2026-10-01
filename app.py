@@ -11,7 +11,14 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.7"
+VERSAO = "V1.8"
+
+# ==============================
+# EXIBIÇÃO
+# True  -> mostra os modelos "Com plano de saúde" na barra lateral e nas instruções
+# False -> oculta (a conversão dessas planilhas continua funcionando)
+# ==============================
+EXIBIR_MODELOS_PLANO = True
 
 # ==============================
 # LEIAUTE DO ARQUIVO DE ALOCAÇÃO
@@ -19,14 +26,14 @@ VERSAO = "V1.7"
 # ==============================
 ALOC_SEPARADOR   = "\t"   # tabulação
 ALOC_MAX_DIGITOS = 7
+ALOC_TABELA      = "FOTROCAS_SERVICOS_IMPORTACAO"
 
 # ==============================
 # REGISTRO 11 — DIAS DE FALTAS / REEMBOLSO DE FALTAS
 # Leiaute Domínio: 001-002 "11" | 003-010 Data AAAAMMDD | 011-011 Tipo (1-Normal, 2-DSR)
 # Na célula do evento: datas DD/MM/AAAA separadas por ';' (ou quebra de linha / '|')
 # Indicador DSR antes ou depois da data -> tipo 2
-#   Ex.: 02/01/2026 DSR;03/01/2026  |  DSR 02/01/2026  |  02/01/2026-DSR  |  02/01/2026 (D.S.R.)
-# Válido para TODOS os modelos (Sem Plano, Com Plano, Serviço, Com Plano e Serviço, Vertical V2)
+# Válido para TODOS os modelos
 # ==============================
 FALTA_SEPARADOR   = ";"
 FALTA_TIPO_NORMAL = "1"
@@ -46,21 +53,22 @@ LIMITE_CABECALHO = 40
 # chave: (tem_plano, tem_servico)
 # ==============================
 MODELOS = {
-    (False, False): "Importação de Eventos - Sem Plano",
-    (True,  False): "Importação de Eventos - Com Plano",
+    (False, False): "Importação de Eventos - Sem plano de saúde",
+    (True,  False): "Importação de Eventos - Com plano de saúde",
     (False, True):  "Importação de Eventos - Serviço",
-    (True,  True):  "Importação de Eventos - Com Plano e Serviço",
+    (True,  True):  "Importação de Eventos - Com plano de saúde e serviço",
 }
 
+# (rótulo, arquivo base64 na pasta do app, nome do .bgr baixado, key, usa plano de saúde)
 MODELOS_BGR = [
-    ("Sem Plano",           "bgr_base64_sem_plano.txt",
-     "Importação de Eventos - Sem Plano.bgr",           "btn_bgr_sem_plano"),
-    ("Com Plano",           "bgr_base64_com_plano.txt",
-     "Importação de Eventos - Com Plano.bgr",           "btn_bgr_com_plano"),
-    ("Serviço",             "bgr_base64_com_servico.txt",
-     "Importação de Eventos - Serviço.bgr",             "btn_bgr_servico"),
-    ("Com Plano e Serviço", "bgr_base64_com_plano_servico.txt",
-     "Importação de Eventos - Com Plano e Serviço.bgr", "btn_bgr_com_plano_servico"),
+    ("Sem plano de saúde",           "bgr_base64_sem_plano.txt",
+     "Importação de Eventos - Sem plano de saúde.bgr",           "btn_bgr_sem_plano",         False),
+    ("Com plano de saúde",           "bgr_base64_com_plano.txt",
+     "Importação de Eventos - Com plano de saúde.bgr",           "btn_bgr_com_plano",         True),
+    ("Serviço",                      "bgr_base64_com_servico.txt",
+     "Importação de Eventos - Serviço.bgr",                      "btn_bgr_servico",           False),
+    ("Com plano de saúde e serviço", "bgr_base64_com_plano_servico.txt",
+     "Importação de Eventos - Com plano de saúde e serviço.bgr", "btn_bgr_com_plano_servico", True),
 ]
 
 
@@ -97,13 +105,19 @@ def apply_tr_theme():
             border-radius: 4px; padding: 16px 20px; margin: 12px 0;
             color: #444444; font-family: 'Segoe UI', Arial, sans-serif;
         }
-        .instrucoes-box h4 { color: #FF8000; margin-top: 14px; margin-bottom: 6px; }
+        .instrucoes-box h4 { color: #FF8000; margin-top: 16px; margin-bottom: 6px; }
         .instrucoes-box h4:first-child { margin-top: 0; }
+        .instrucoes-box h5 { color: #444444; margin-top: 12px; margin-bottom: 4px; }
         .instrucoes-box table { border-collapse: collapse; width: 100%; margin: 6px 0 10px 0; }
         .instrucoes-box th, .instrucoes-box td {
             border: 1px solid #CCCCCC; padding: 6px 8px; text-align: left; vertical-align: top;
         }
         .instrucoes-box th { background-color: #FF8000; color: #FFFFFF; }
+        .instrucoes-box details {
+            background-color: #F5F5F5; border: 1px dashed #AAAAAA;
+            border-radius: 4px; padding: 8px 12px; margin-top: 10px;
+        }
+        .instrucoes-box summary { cursor: pointer; font-weight: bold; color: #444444; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -125,7 +139,6 @@ def carregar_bgr_bytes(nome_arquivo_b64: str):
 # ==============================
 # UTILITÁRIOS
 # ==============================
-# Caracteres invisíveis removidos e espaços especiais convertidos em espaço comum
 _INVISIVEIS = {ord(c): None for c in "\u200b\u200c\u200d\u2060\ufeff\u00ad"}
 _ESPACOS    = {ord(c): " " for c in "\u00a0\u202f\u2007\u2009\u200a\t"}
 
@@ -302,7 +315,7 @@ def extrair_datas_falta(v):
     for parte in _RE_SEP_FALTA.split(s):
         parte = parte.strip()
         if not parte:
-            continue                                    # ';' sobrando
+            continue
         datas = list(_RE_DATA_FALTA.finditer(parte))
         if not datas:
             raise ValueError(
@@ -661,10 +674,10 @@ def detectar_colunas(df, cab1, cab2):
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     """
     Leiaute 1 — modelos (todos com regra de faltas / Registro 11):
-    - Sem Plano            -> 10 (+ 11)
-    - Com Plano            -> 10 (+ 11) + 20 + 25 (eventos de plano, sem faltas)
-    - Serviço              -> 10 (total) + 11 + 40 (por serviço) + Alocacao.txt
-    - Com Plano e Serviço  -> todas as regras acima
+    - Sem plano de saúde            -> 10 (+ 11)
+    - Com plano de saúde            -> 10 (+ 11) + 20 + 25 (eventos de plano, sem faltas)
+    - Serviço                       -> 10 (total) + 11 + 40 (por serviço) + Alocacao.txt
+    - Com plano de saúde e serviço  -> todas as regras acima
     """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
     if cab1 is None or cab2 is None:
@@ -928,7 +941,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     if qtd_serv_saude_ignorado:
         log.append(
             f"AVISO: {qtd_serv_saude_ignorado} lançamento(s) de plano de saúde com "
-            f"Código Serviço — rateio não aplicado a eventos de plano."
+            f"Código Serviço — rateio não aplicado a eventos de plano de saúde."
         )
 
     if erros:
@@ -1179,7 +1192,7 @@ def processar_bytes(arquivo_bytes, log):
         log.append(f"Registros 11 (faltas): {extras['qtd_reg11']}")
         log.append(f"Faltas DSR (tipo 2): {extras['qtd_dsr']}")
         log.append(f"Registros 40    : {extras['qtd_reg40']}")
-        log.append(f"Eventos saúde   : {qtd_saude}")
+        log.append(f"Eventos plano de saúde: {qtd_saude}")
         log.append(f"Total de linhas : {len(linhas_saida)}")
         log.append(f"Alocações       : {len(extras['alocacao'])}")
 
@@ -1193,6 +1206,177 @@ def processar_bytes(arquivo_bytes, log):
     except Exception as e:
         log.append(f"ERRO: {e}")
         return None, None, None
+
+
+# ==============================
+# INSTRUÇÕES DE USO
+# Ordem: passos -> como preencher -> observações -> detalhes técnicos (fim, recolhido)
+# ==============================
+def montar_instrucoes():
+    plano = EXIBIR_MODELOS_PLANO
+    p = []
+
+    p.append('<div class="instrucoes-box">')
+
+    # ---------------- PASSOS ----------------
+    p.append("<h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>")
+    p.append("<p>Na barra lateral, baixe o arquivo <code>.bgr</code> do modelo desejado:</p>")
+    p.append("<ul>")
+    p.append("<li><b>Sem plano de saúde</b> — lançamentos comuns da folha (horas, faltas, valores).</li>")
+    if plano:
+        p.append("<li><b>Com plano de saúde</b> — quando houver valores de plano de saúde "
+                 "por titular e dependentes.</li>")
+    p.append("<li><b>Serviço</b> — quando houver alocação e/ou rateio de valores por serviço "
+             "(tomador/obra).</li>")
+    if plano:
+        p.append("<li><b>Com plano de saúde e serviço</b> — junta as duas situações acima.</li>")
+    p.append("</ul>")
+
+    p.append("<h4>🔹 Passo 2 — Importar o modelo no Domínio</h4>")
+    p.append("<p>Utilitários → Gerador de Relatórios → Importar → selecione o "
+             "<code>.bgr</code> baixado.</p>")
+
+    p.append("<h4>🔹 Passo 3 — Preencher e exportar a planilha</h4>")
+    p.append("<p>Execute o relatório em <b>Utilitários → Gerador de Relatórios</b>, informe a "
+             "empresa, a competência e as rubricas desejadas e exporte em "
+             "<b>Excel (.xlsx ou .xls)</b>.</p>")
+    p.append("<p>Os dados de alocação e/ou rateio de valores são lançados na própria planilha. "
+             "Se o colaborador tiver <b>mais de um serviço</b> na competência, "
+             "<b>duplique a linha desse colaborador</b> na planilha — uma linha para cada serviço.</p>")
+    p.append("<p>Os valores informados em cada evento serão lançados para o "
+             "<b>serviço correspondente daquela linha</b>.</p>")
+
+    p.append("<h4>🔹 Passo 4 — Gerar os arquivos TXT</h4>")
+    p.append("<p>Faça o upload no campo indicado desta página, clique em "
+             "<b>▶ Gerar arquivo TXT</b> e baixe os arquivos.</p>")
+
+    p.append("<h4>🔹 Passo 5 — Importar no Domínio</h4>")
+    p.append("<ol>")
+    p.append(
+        "<li><b>Alocacao.txt</b> (se gerado) → Folha → Utilitários → Importação → "
+        "de Arquivo Texto → <b>De Tabela</b>.<br>"
+        "Selecione o <b>Nome do Layout</b>, se já foi salvo anteriormente para alocação de serviço.<br>"
+        f"Selecione a tabela <code>{ALOC_TABELA}</code> "
+        "(Descrição: <i>Tabela de Importação de Trocas de Serviço</i>).<br>"
+        "Informe o diretório de origem do arquivo TXT gerado nesta página e o nome do arquivo "
+        "na linha correspondente da tabela.</li>"
+    )
+    p.append(
+        "<li><b>Eventos</b> → Folha → Utilitários → Importação → de Arquivo Texto → "
+        "<b>De Lançamentos</b>.<br>"
+        "Importe os eventos <b>somente após</b> a importação ou digitação da alocação dos "
+        "serviços da competência.</li>"
+    )
+    p.append("</ol>")
+
+    p.append("<hr>")
+
+    # ---------------- COMO PREENCHER ----------------
+    p.append("<h4>📝 Como preencher a planilha</h4>")
+
+    p.append("<h5>Horas, dias e valores</h5>")
+    p.append("<ul>")
+    p.append("<li>Horas: respeite o formato já usado na empresa. Ex.: uma hora e meia = "
+             "<code>1,30</code> em minutos ou <code>1,50</code> em decimais.</li>")
+    p.append("<li>Dias: use vírgula como separador. Ex.: uma falta = <code>1,00</code>.</li>")
+    p.append("<li>Células vazias ou com zero são ignoradas.</li>")
+    p.append("</ul>")
+
+    p.append("<h5>Faltas com data (inclusive DSR)</h5>")
+    p.append("<ul>")
+    p.append("<li>Na coluna do evento de faltas, em vez da quantidade, você pode informar as "
+             "<b>datas no formato DD/MM/AAAA, separadas por ponto e vírgula (;)</b>. "
+             "Ex.: <code>02/01/2026;03/01/2026</code>.</li>")
+    p.append("<li>Para falta de <b>DSR</b>, escreva <code>DSR</code> junto da data. "
+             "Ex.: <code>02/01/2026 DSR;03/01/2026</code>.</li>")
+    p.append("<li>Somente a data = falta normal.</li>")
+    p.append("<li>A quantidade de dias é calculada automaticamente (1,00 por data).</li>")
+    p.append("<li>Não repita a mesma data para o mesmo colaborador e evento.</li>")
+    p.append("<li>Após gerar, confira no log a lista de datas com o tipo (Normal/DSR).</li>")
+    p.append("</ul>")
+
+    p.append("<h5>Serviços (modelos com serviço)</h5>")
+    p.append("<ul>")
+    p.append("<li><b>Código Serviço</b>: código do serviço em que o valor da linha será lançado.</li>")
+    p.append("<li><b>Descrição Serviço</b>: apenas para conferência; não é importada.</li>")
+    p.append("<li><b>Data da Troca</b>: data em que o colaborador passou a atuar no serviço. "
+             "Quando preenchida, gera o arquivo de alocação.</li>")
+    p.append("<li>Código Serviço em branco: lançamento normal, sem vínculo com serviço.</li>")
+    p.append("<li>Se uma rubrica do colaborador tiver serviço em uma linha, informe o serviço "
+             "em todas as linhas dessa rubrica.</li>")
+    p.append("<li>Pré-requisitos no Domínio: serviços cadastrados e "
+             "<b>Parâmetros → Geral → Cálculo → Rateio por serviço = Sim</b>.</li>")
+    p.append("</ul>")
+
+    if plano:
+        p.append("<h5>Plano de saúde (modelos com plano de saúde)</h5>")
+        p.append("<ul>")
+        p.append("<li>Na linha <b>Evento de Plano de Saúde</b>, marque <b>Sim</b> nas colunas "
+                 "dos eventos de plano e informe o <b>CNPJ da Operadora</b> logo abaixo.</li>")
+        p.append("<li>Titular na linha com Código Empregado; dependentes nas linhas seguintes, "
+                 "com Código Dependente.</li>")
+        p.append("<li>Eventos de plano de saúde <b>não são rateados</b> por serviço e "
+                 "não aceitam datas de falta.</li>")
+        p.append("<li>No modelo com serviço, informe serviço e data da troca "
+                 "<b>somente na linha do titular</b>.</li>")
+        p.append("</ul>")
+
+    # ---------------- OBSERVAÇÕES ----------------
+    p.append("<h4>⚠ Observações</h4>")
+    p.append("<ul>")
+    p.append("<li>Se houver qualquer erro, <b>nenhum arquivo é gerado</b>: corrija a planilha "
+             "conforme o log e gere novamente.</li>")
+    p.append("<li>Um colaborador não pode ter dois serviços diferentes na mesma data da troca.</li>")
+    p.append("<li>Linhas repetidas (mesmo colaborador, serviço e data) geram uma única alocação.</li>")
+    p.append(f"<li>Códigos de empresa, empregado e serviço na alocação: até "
+             f"<b>{ALOC_MAX_DIGITOS} dígitos</b>.</li>")
+    p.append("<li>Confira se as datas informadas pertencem à competência da planilha.</li>")
+    p.append("</ul>")
+
+    # ---------------- DETALHES TÉCNICOS (FIM) ----------------
+    p.append("<details>")
+    p.append("<summary>🔧 Detalhes técnicos dos arquivos (leiautes) — para consulta do suporte</summary>")
+
+    p.append("<h5>Registros gerados por modelo</h5>")
+    p.append("<table>")
+    p.append("<tr><th>Modelo</th><th>Arquivo de eventos</th><th>Alocação</th></tr>")
+    p.append("<tr><td>Sem plano de saúde</td><td>10 + 11</td><td>—</td></tr>")
+    if plano:
+        p.append("<tr><td>Com plano de saúde</td><td>10 + 11 + 20 + 25</td><td>—</td></tr>")
+    p.append("<tr><td>Serviço</td><td>10 + 11 + 40</td><td>Alocacao.txt</td></tr>")
+    if plano:
+        p.append("<tr><td>Com plano de saúde e serviço</td><td>10 + 11 + 20 + 25 + 40</td>"
+                 "<td>Alocacao.txt</td></tr>")
+    p.append("<tr><td>Vertical V2 (Relação de Valores)</td><td>10 + 11</td><td>—</td></tr>")
+    p.append("</table>")
+
+    p.append("<h5>Significado dos registros</h5>")
+    p.append("<ul>")
+    p.append("<li><b>10</b> — lançamento do evento (empregado, competência, rubrica, "
+             "tipo de cálculo, valor, empresa).</li>")
+    p.append("<li><b>11</b> — dias de faltas / reembolso de faltas: "
+             "posições 001-002 = <code>11</code>, 003-010 = data <code>AAAAMMDD</code>, "
+             "011 = tipo (<code>1</code> Normal | <code>2</code> DSR). "
+             "Um registro por data, logo abaixo do registro 10.</li>")
+    if plano:
+        p.append("<li><b>20</b> — CNPJ da operadora de plano de saúde.</li>")
+        p.append("<li><b>25</b> — beneficiário do plano (T = titular, D = dependente) e valor.</li>")
+    p.append("<li><b>40</b> — valor da rubrica por serviço; o registro 10 traz o total.</li>")
+    p.append("</ul>")
+
+    p.append("<h5>Leiaute do Alocacao.txt</h5>")
+    p.append("<p>Campos separados por <b>tabulação</b>, nesta ordem: "
+             "<code>Código Empresa | Código Empregado | Código Serviço | Data da Troca (DD/MM/AAAA)</code>. "
+             f"Ao criar o layout em <b>De Tabela</b> pela primeira vez, use a tabela "
+             f"<code>{ALOC_TABELA}</code> com os campos nessa ordem e salve o layout para "
+             "as próximas importações.</p>")
+    p.append("</details>")
+
+    p.append("</div>")
+
+    # Remove recuos e linhas em branco (evita que o Markdown trate trechos como bloco de código)
+    html = "\n".join(p)
+    return "\n".join(l.strip() for l in html.splitlines() if l.strip())
 
 
 # ==============================
@@ -1228,9 +1412,11 @@ def main():
         st.markdown("### 📥 Modelos de Planilha")
         st.markdown(
             "Baixe o modelo correspondente ao seu tipo de lançamento "
-            "e importe no **Domínio Sistemas**."
+            "e importe no **Domínio Sistemas** (veja o Passo 2 das instruções)."
         )
-        for rotulo, arq_b64, nome_bgr, chave in MODELOS_BGR:
+        for rotulo, arq_b64, nome_bgr, chave, usa_plano in MODELOS_BGR:
+            if usa_plano and not EXIBIR_MODELOS_PLANO:
+                continue
             dados_bgr = carregar_bgr_bytes(arq_b64)
             if dados_bgr is not None:
                 st.download_button(
@@ -1251,83 +1437,7 @@ def main():
         st.markdown("**Domínio Sistemas**")
 
     with st.expander("📖 **Instruções de Uso** — clique para expandir", expanded=False):
-        st.markdown(
-            """
-            <div class="instrucoes-box">
-
-            <h4>🔹 Modelos de planilha (identificados automaticamente)</h4>
-            <table>
-                <tr><th>Modelo</th><th>Colunas</th><th>Arquivos gerados</th></tr>
-                <tr><td><b>Sem Plano</b></td>
-                    <td>Tipo de Cálculo, Código Folha, Nome dos Colaboradores, eventos</td>
-                    <td>Eventos (10 + 11)</td></tr>
-                <tr><td><b>Com Plano</b></td>
-                    <td>+ Código Dependente e linhas "Evento de Plano de Saúde (Sim/Não)"
-                        e "CNPJ da Operadora"</td>
-                    <td>Eventos (10 + 11 + 20 + 25)</td></tr>
-                <tr><td><b>Serviço</b></td>
-                    <td>+ Código Serviço, Descrição Serviço, Data da Troca</td>
-                    <td>Eventos (10 + 11 + 40) + Alocação</td></tr>
-                <tr><td><b>Com Plano e Serviço</b></td>
-                    <td>Todas as colunas acima</td>
-                    <td>Eventos (10 + 11 + 20 + 25 + 40) + Alocação</td></tr>
-                <tr><td><b>Vertical V2</b></td>
-                    <td>Tipo de Cálculo, Código Folha, Código Rubrica, Referência/Valor</td>
-                    <td>Eventos (10 + 11)</td></tr>
-            </table>
-
-            <h4>🔹 Dias de faltas e reembolso de faltas (Registro 11) — todos os modelos</h4>
-            <ul>
-                <li>Na célula do evento (ou em Referência/Valor no V2), informe as datas
-                    <b>DD/MM/AAAA separadas por ponto e vírgula (;)</b>.
-                    Ex.: <code>02/01/2026;03/01/2026</code>.</li>
-                <li><b>Falta de DSR (tipo 2):</b> escreva <code>DSR</code> junto da data —
-                    antes ou depois. Ex.: <code>02/01/2026 DSR</code>, <code>DSR 02/01/2026</code>,
-                    <code>02/01/2026-DSR</code>, <code>02/01/2026 (D.S.R.)</code>.</li>
-                <li>Somente a data → tipo 1 (Normal).</li>
-                <li>Gera o Registro 10 com a <b>quantidade de dias</b> (1,00 por data) e,
-                    logo abaixo, <b>um Registro 11 para cada data</b>.</li>
-                <li>Texto não reconhecido ao lado da data gera <b>erro</b> (nunca vira Normal sem aviso).</li>
-                <li>O log mostra cada data com o tipo gerado — confira antes de importar.</li>
-                <li>Apenas um número (ex.: <code>2,00</code>) → só o Registro 10, sem datas.</li>
-                <li>A mesma data não pode se repetir para o mesmo colaborador e evento.</li>
-                <li>Não permitido em eventos de plano de saúde nem em linhas de dependente.</li>
-            </ul>
-
-            <h4>🔹 Rateio por serviço (modelos Serviço e Com Plano e Serviço)</h4>
-            <ul>
-                <li><b>Código Serviço</b> preenchido → Registro 10 com o <b>total</b>,
-                    Registros 11 das faltas e um Registro 40 por serviço.</li>
-                <li><b>Descrição Serviço</b> → apenas para conferência.</li>
-                <li><b>Data da Troca</b> preenchida → gera o <b>Alocacao.txt</b> (tabulado):
-                    <code>Código Empresa | Código Empregado | Código Serviço | Data da Troca</code>.</li>
-                <li>Código Serviço em branco → lançamento padrão.</li>
-                <li>No modelo <b>Com Plano e Serviço</b>, serviço e data <b>somente na linha do titular</b>.</li>
-                <li>Pré-requisitos: serviços cadastrados e
-                    <b>Parâmetros &gt; Geral &gt; Cálculo &gt; Rateio por serviço = Sim</b>.</li>
-            </ul>
-
-            <h4>🔹 Passos</h4>
-            <ol>
-                <li>Baixe o <code>.bgr</code> do modelo na barra lateral.</li>
-                <li>Domínio: Utilitários → Gerador de Relatórios → Importar → selecione o <code>.bgr</code>.</li>
-                <li>Execute o relatório, preencha e exporte em <b>Excel (.xlsx ou .xls)</b>.</li>
-                <li>Faça o upload e clique em <b>▶ Gerar arquivo TXT</b>.</li>
-                <li>Importe primeiro o <b>Alocacao.txt</b> (se houver) e depois os <b>Eventos</b>
-                    (Folha → Utilitários → Importação → de Arquivo Texto → De Lançamentos).</li>
-            </ol>
-
-            <hr>
-            <h4>⚠ Observações</h4>
-            <ul>
-                <li>Linhas com <b>valor vazio ou zero</b> são ignoradas.</li>
-                <li>Códigos na alocação: até <b>7 dígitos</b>.</li>
-                <li>Se houver erro, nenhum arquivo é gerado: corrija e gere novamente.</li>
-            </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown(montar_instrucoes(), unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -1343,11 +1453,15 @@ def main():
         if k not in st.session_state:
             st.session_state[k] = v
 
+    modelos_ajuda = (
+        "Sem plano de saúde, Com plano de saúde, Serviço, Com plano de saúde e serviço "
+        "ou Vertical V2." if EXIBIR_MODELOS_PLANO else
+        "Sem plano de saúde, Serviço ou Vertical V2."
+    )
     arquivo = st.file_uploader(
         "Excel de origem (.xlsx ou .xls)",
         type=["xlsx", "xls"],
-        help="Sem Plano, Com Plano, Serviço, Com Plano e Serviço ou Vertical V2. "
-             "Detectado automaticamente.",
+        help=f"{modelos_ajuda} Detectado automaticamente.",
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1425,11 +1539,13 @@ def main():
                     key="dl_alocacao",
                 )
         if st.session_state.txt_aloc is not None:
-            st.info("ℹ Importe primeiro o arquivo de **Alocação** e depois o de **Eventos**.")
+            st.info(
+                "ℹ Importe primeiro o arquivo de **Alocação** (De Tabela → "
+                f"`{ALOC_TABELA}`) e depois o de **Eventos** (De Lançamentos)."
+            )
 
         if st.session_state.txt_conv is not None:
-            with st.expander("🔎 Pré-visualizar TXT de Eventos "
-                             "(Registro 11: posição 11 = tipo — 1 Normal | 2 DSR)"):
+            with st.expander("🔎 Pré-visualizar TXT de Eventos"):
                 linhas_prev = st.session_state.txt_conv.decode(
                     "utf-8", errors="replace").splitlines()
                 st.code("\n".join(linhas_prev[:500]), language=None)
@@ -1450,13 +1566,13 @@ def main():
     normais = ler_metrica("Eventos normais")
     if normais is not None:
         c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-        c1.metric("Eventos normais",   normais)
-        c2.metric("Eventos c/ rateio", ler_metrica("Eventos c/ rateio"))
-        c3.metric("Faltas (reg. 11)",  ler_metrica("Registros 11"))
-        c4.metric("Faltas DSR",        ler_metrica("Faltas DSR"))
-        c5.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
-        c6.metric("Total de linhas",   ler_metrica("Total de linhas"))
-        c7.metric("Alocações",         ler_metrica("Alocações"))
+        c1.metric("Eventos normais",        normais)
+        c2.metric("Eventos c/ rateio",      ler_metrica("Eventos c/ rateio"))
+        c3.metric("Faltas com data",        ler_metrica("Registros 11"))
+        c4.metric("Faltas DSR",             ler_metrica("Faltas DSR"))
+        c5.metric("Eventos plano de saúde", ler_metrica("Eventos plano de saúde"))
+        c6.metric("Total de linhas",        ler_metrica("Total de linhas"))
+        c7.metric("Alocações",              ler_metrica("Alocações"))
 
     st.markdown("**Log de processamento**")
     log_texto = "\n".join(log)
