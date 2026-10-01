@@ -2,6 +2,7 @@ import os
 import re
 import io
 import base64
+from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from collections import defaultdict
 import pandas as pd
@@ -10,7 +11,20 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.1"
+VERSAO = "V1.3"
+
+# ==============================
+# CONFIGURAÇÃO DO ARQUIVO DE ALOCAÇÃO
+# (equivalente às linhas SEPARADOR / REGISTRO do Converter.bat)
+# ==============================
+ALOC_SEPARADOR   = "|"    # ex.: ";" se a rotina exigir ponto e vírgula
+ALOC_REGISTRO    = "10"   # use "" para gerar SEM o identificador
+ALOC_MAX_DIGITOS = 7
+
+# Células maiores que isso não são consideradas cabeçalho
+# (evita que textos de observação/instrução na planilha atrapalhem a detecção)
+LIMITE_CABECALHO = 40
+
 
 # ==============================
 # TEMA TR
@@ -126,6 +140,13 @@ def so_numeros(v):
     return re.sub(r"\D", "", str(v))
 
 
+def cod_num(v):
+    """Código numérico tolerante a float do Excel (ex.: 2.0 -> '2')."""
+    if isinstance(v, float) and not pd.isna(v) and v.is_integer():
+        return str(int(v))
+    return so_numeros(v)
+
+
 def normalizar(v):
     s = texto(v).lower().strip()
     mapa = {
@@ -154,7 +175,6 @@ def competencia_yyyymm(v):
             return ""
     except Exception:
         pass
-    from datetime import datetime
     if isinstance(v, datetime):
         return f"{v.year:04d}{v.month:02d}"
     s = texto(v)
@@ -175,6 +195,43 @@ def competencia_yyyymm(v):
         if yyyy.isdigit() and mm.isdigit() and 1 <= int(mm) <= 12:
             return f"{yyyy}{mm}"
     return ""
+
+
+def parse_data(v):
+    """
+    Converte a célula 'Data da Troca' em date.
+    Retorna None se vazia. Lança ValueError se inválida.
+    Aceita: datetime/Timestamp, serial do Excel, 'DD/MM/AAAA', 'AAAA-MM-DD'.
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if isinstance(v, (datetime, date)):          # pd.Timestamp herda de datetime
+        return date(v.year, v.month, v.day)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if 1 <= v <= 2958465:                    # serial de data do Excel
+            d = datetime(1899, 12, 30) + timedelta(days=int(v))
+            return d.date()
+        raise ValueError("data inválida")
+    s = texto(v)
+    if not s:
+        return None
+    if s.isdigit() and len(s) == 5:              # serial do Excel como texto
+        d = datetime(1899, 12, 30) + timedelta(days=int(s))
+        return d.date()
+    m = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})(?:\s+.*)?", s)
+    if m:
+        d, mth, y = map(int, m.groups())
+        return date(y, mth, d)                   # ValueError se inexistente
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?", s)
+    if m:
+        y, mth, d = map(int, m.groups())
+        return date(y, mth, d)
+    raise ValueError("data inválida")
 
 
 def eh_sim(v):
@@ -213,8 +270,8 @@ def valor_para_layout(v, tamanho=9):
 # ==============================
 LEIAUTES = {
     # -------------------------------------------------------
-    # LEIAUTE 1 — Original (horizontal, eventos em colunas)
-    # 100% idêntico ao V1.0 — NÃO ALTERADO
+    # LEIAUTE 1 — Horizontal (eventos em colunas)
+    # + Registro 40 (rateio por serviço) e Alocacao.txt
     # -------------------------------------------------------
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
@@ -223,6 +280,7 @@ LEIAUTES = {
             "marcadores": ["folha", "colaboradores"],
         },
         "registros": {
+            # REGISTRO DE LANÇAMENTOS
             "10": [
                 ("fixo",        2,  "10"),
                 ("empregado",  10),
@@ -242,13 +300,18 @@ LEIAUTES = {
                 ("codigo_beneficiario", 10),
                 ("valor",               9),
             ],
+            # REGISTRO DE INFORMAÇÃO DE LANÇAMENTO POR SERVIÇO
+            "40": [
+                ("fixo",     2, "40"),
+                ("servico", 10),
+                ("rubrica",  9),
+                ("valor",    9),
+            ],
         },
     },
 
     # -------------------------------------------------------
     # LEIAUTE 2 — Relação de Valores V2 (vertical)
-    # Cada linha = um evento. Rubrica lida da coluna "Código Rubrica".
-    # Aceita .xls e .xlsx.
     # -------------------------------------------------------
     "relacao_valores_vertical": {
         "nome": "Relação de Valores Para Folha de Pagamento V2 | Vertical",
@@ -271,27 +334,14 @@ LEIAUTES = {
 # DETECÇÃO DE LEIAUTE
 # ==============================
 def detectar_leiaute(df):
-    """
-    Detecta o leiaute pela estrutura REAL do cabeçalho de dados,
-    sem depender do nome da aba nem do título da célula A1.
-
-    Lógica:
-      Varre pares de linhas consecutivas procurando o cabeçalho de dados.
-      Se encontrar "codigo rubrica" + "referencia" / "valor" na mesma
-      linha combinada → Leiaute 2 (vertical).
-      Caso contrário → Leiaute 1 (horizontal, comportamento original V1.0).
-
-    Por quê isso é robusto:
-      - "codigo rubrica" NUNCA aparece no cabeçalho do Leiaute 1
-        (lá os códigos ficam nas células de dados, não no header).
-      - "referencia valor" NUNCA aparece no Leiaute 1
-        (lá a segunda linha do header tem os códigos numéricos dos eventos).
-      - Independe do nome da aba, título da célula, idioma do Excel, etc.
-    """
     for i in range(len(df) - 1):
         linha_a = [normalizar(x) for x in df.iloc[i].tolist()]
         linha_b = [normalizar(x) for x in df.iloc[i + 1].tolist()]
-        combinadas = [f"{a} {b}".strip() for a, b in zip(linha_a, linha_b)]
+        combinadas = [
+            f"{a} {b}".strip()
+            for a, b in zip(linha_a, linha_b)
+            if len(a) <= LIMITE_CABECALHO and len(b) <= LIMITE_CABECALHO
+        ]
 
         tem_codigo_rubrica = any("codigo rubrica" in c for c in combinadas)
         tem_referencia     = any(
@@ -300,21 +350,18 @@ def detectar_leiaute(df):
             c.strip() in ("referencia", "valor")
             for c in combinadas
         )
-
         if tem_codigo_rubrica and tem_referencia:
             return "relacao_valores_vertical"
 
-    # Padrão: Leiaute 1 — comportamento 100% original do V1.0
     return "importacao_arquivo_texto_lancamentos"
 
 
 # ==============================
 # UTILITÁRIOS DE LAYOUT
-# (100% idênticos ao V1.0)
 # ==============================
 def ajustar_campo_layout(nome, valor, tamanho):
     valor = "" if valor is None else str(valor)
-    if nome in ("empregado", "empresa", "codigo_beneficiario"):
+    if nome in ("empregado", "empresa", "codigo_beneficiario", "servico"):
         return zfill_num(valor, tamanho)
     if nome in ("rubrica", "tpcalc", "cnpj_operadora", "competencia", "valor"):
         return so_numeros(valor).zfill(tamanho)
@@ -338,7 +385,6 @@ def montar_registro(layout, tipo_registro, dados):
 
 # ==============================
 # LEITURA EXCEL (.xlsx e .xls)
-# (100% idêntico ao V1.0)
 # ==============================
 def carregar_excel(arquivo_bytes):
     try:
@@ -351,8 +397,7 @@ def carregar_excel(arquivo_bytes):
 
 
 # ==============================
-# METADADOS — compartilhado
-# (100% idêntico ao V1.0)
+# METADADOS
 # ==============================
 def localizar_metadados(df):
     cod_empresa = competencia = ""
@@ -377,14 +422,17 @@ def localizar_metadados(df):
 
 # ==============================
 # LEIAUTE 1 — funções exclusivas
-# (100% idênticas ao V1.0)
 # ==============================
 def localizar_estrutura(df):
     cab1 = cab2 = linha_plano = linha_cnpj = linha_dados = None
     for i in range(len(df)):
         row = [normalizar(x) for x in df.iloc[i].tolist()]
         joined = " | ".join(row)
-        if cab1 is None and "tipo de" in joined and "codigo" in joined:
+        celulas = [c for c in row if c and len(c) <= LIMITE_CABECALHO]
+
+        if cab1 is None and \
+           any(c.startswith("tipo de") for c in celulas) and \
+           any(c.startswith("codigo") for c in celulas):
             cab1 = i
             if i + 1 < len(df):
                 cab2 = i + 1
@@ -407,15 +455,49 @@ def localizar_estrutura(df):
     return cab1, cab2, linha_plano, linha_cnpj, linha_dados
 
 
+_ALVOS_SERVICO = ("servico", "tomador", "obra")
+
+
+def _primeiro_termo(b):
+    """'servico/tomador/obra' -> 'servico'"""
+    return b.split("/")[0].strip()
+
+
+def _eh_col_codigo_servico(a, b, comb):
+    return (
+        comb.startswith(("codigo servico", "codigo do servico",
+                         "codigo tomador", "codigo obra"))
+        or (a == "codigo" and _primeiro_termo(b) in _ALVOS_SERVICO)
+    )
+
+
+def _eh_col_descricao_servico(a, b, comb):
+    return (
+        comb.startswith(("descricao servico", "descricao do servico",
+                         "nome do servico", "nome servico",
+                         "descricao tomador", "descricao obra"))
+        or (a in ("descricao", "nome do", "nome") and _primeiro_termo(b) in _ALVOS_SERVICO)
+    )
+
+
 def detectar_colunas(df, cab1, cab2):
+    """
+    Detecta 'Código Serviço', 'Descrição Serviço' e 'Data da Troca'
+    pelo cabeçalho, em qualquer posição. Nenhuma delas vira evento.
+    A Descrição Serviço é apenas para conferência (não é importada).
+    """
     linha1 = [texto(x) for x in df.iloc[cab1].tolist()]
     linha2 = [texto(x) for x in df.iloc[cab2].tolist()]
     col_tipo = col_emp = col_dep = col_nome = None
+    col_serv = col_desc_serv = col_data = None
     eventos = {}
     for col in range(len(linha1)):
         a = normalizar(linha1[col])
         b = normalizar(linha2[col])
+        if len(a) > LIMITE_CABECALHO or len(b) > LIMITE_CABECALHO:
+            continue
         combinado = f"{a} {b}".strip()
+
         if col_tipo is None and (
             "tipo de calculo" in combinado or
             (a == "tipo de" and b == "calculo")
@@ -437,35 +519,64 @@ def detectar_colunas(df, cab1, cab2):
             (a == "nome dos" and b == "colaboradores")
         ):
             col_nome = col; continue
+        if col_serv is None and _eh_col_codigo_servico(a, b, combinado):
+            col_serv = col; continue
+        if col_desc_serv is None and _eh_col_descricao_servico(a, b, combinado):
+            col_desc_serv = col; continue
+        if col_data is None and (
+            "data da troca" in combinado or
+            combinado == "data troca" or
+            (a == "data da" and b == "troca")
+        ):
+            col_data = col; continue
+
     col_tipo = col_tipo or 0
     col_emp  = col_emp  or 1
     col_dep  = col_dep  or 2
     col_nome = col_nome or 2
     inicio_eventos = max(col_nome + 1, 3)
     for col in range(inicio_eventos, len(linha2)):
-        cod_evt  = so_numeros(linha2[col])
-        desc_evt = texto(linha1[col])
-        if cod_evt:
+        cod_evt = so_numeros(linha2[col])
+        if cod_evt and len(texto(linha2[col])) <= LIMITE_CABECALHO:
             eventos[col] = cod_evt
-        elif not desc_evt and not texto(linha2[col]):
-            continue
-    for c in (col_tipo, col_emp, col_dep, col_nome):
-        eventos.pop(c, None)
-    return col_tipo, col_emp, col_dep, col_nome, eventos
+
+    for c in (col_tipo, col_emp, col_dep, col_nome,
+              col_serv, col_desc_serv, col_data):
+        if c is not None:
+            eventos.pop(c, None)
+
+    return col_tipo, col_emp, col_dep, col_nome, col_serv, col_desc_serv, col_data, eventos
 
 
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
-    """Leiaute 1 — lógica 100% idêntica ao V1.0."""
+    """
+    Leiaute 1.
+    - Sem Código Serviço  -> Registro 10
+    - Com Código Serviço  -> Registro 10 (total) + Registros 40 (por serviço)
+    - Com Data da Troca   -> linha no Alocacao.txt
+    - Plano de saúde      -> 10 + 20 + 25 (sem rateio)
+    """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
     if cab1 is None or cab2 is None:
         raise ValueError("Cabeçalho da planilha não encontrado.")
     if linha_dados is None:
         raise ValueError("Linhas de dados não encontradas.")
 
-    col_tipo, col_emp, col_dep, col_nome, eventos = detectar_colunas(df, cab1, cab2)
+    (col_tipo, col_emp, col_dep, col_nome,
+     col_serv, col_desc_serv, col_data, eventos) = detectar_colunas(df, cab1, cab2)
     if not eventos:
         raise ValueError("Nenhum evento foi identificado no cabeçalho.")
     log.append(f"Colunas de eventos detectadas: {len(eventos)}")
+
+    def _desc_col(c):
+        return f"col {c + 1}" if c is not None else "não encontrada"
+
+    if col_serv is not None or col_data is not None or col_desc_serv is not None:
+        log.append(
+            f"Colunas de serviço → Código Serviço: {_desc_col(col_serv)}"
+            f" | Descrição Serviço: {_desc_col(col_desc_serv)} (só conferência)"
+            f" | Data da Troca: {_desc_col(col_data)}"
+        )
 
     plano_saude    = {}
     cnpj_operadora = {}
@@ -476,23 +587,81 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for col in eventos:
             cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
 
-    linhas_saida     = []
+    itens_saida      = []                 # str (registro pronto) ou dict (bloco 10+40)
+    blocos_rateio    = {}                 # (emp, rubrica, tpcalc) -> bloco
+    linha_com_serv   = {}                 # chave -> 1ª linha Excel com serviço
+    linha_sem_serv   = {}                 # chave -> 1ª linha Excel sem serviço
+    alocacoes        = {}                 # (emp_int, data) -> (servico, linha)
+    erros            = []
+    avisos           = []
     ultimo_empregado = ""
     total_saude      = defaultdict(int)
     reg10_saude      = {}
     reg20_saude      = {}
     reg25_saude      = defaultdict(list)
-    qtd_normais = qtd_saude = 0
+    qtd_normais = qtd_saude = qtd_serv_saude_ignorado = 0
 
     for i in range(linha_dados, len(df)):
         row = df.iloc[i].tolist()
         if linha_vazia(row):
             continue
+        linha_excel = i + 1
 
         tpcalc  = so_numeros(row[col_tipo]) if col_tipo < len(row) else ""
         cod_emp = so_numeros(row[col_emp])  if col_emp  < len(row) else ""
         cod_dep = so_numeros(row[col_dep])  if col_dep  < len(row) else ""
+        cod_emp_proprio = cod_emp
 
+        cod_serv = ""
+        if col_serv is not None and col_serv < len(row):
+            cod_serv = cod_num(row[col_serv]).lstrip("0")
+        raw_data = row[col_data] if (col_data is not None and col_data < len(row)) else ""
+
+        # ---------- ALOCAÇÃO (Data da Troca preenchida) ----------
+        if col_data is not None:
+            dt_troca = None
+            try:
+                dt_troca = parse_data(raw_data)
+            except ValueError:
+                erros.append(
+                    f"Linha {linha_excel}: Data da troca invalida ({texto(raw_data)}). "
+                    f"Informe no formato DD/MM/AAAA."
+                )
+            if dt_troca is not None:
+                emp_aloc = cod_emp_proprio.lstrip("0")
+                if not emp_aloc:
+                    erros.append(f"Linha {linha_excel}: Codigo do empregado nao informado.")
+                elif not cod_serv:
+                    erros.append(
+                        f"Linha {linha_excel}: Codigo do servico nao informado "
+                        f"(Data da Troca preenchida)."
+                    )
+                elif len(emp_aloc) > ALOC_MAX_DIGITOS or len(cod_serv) > ALOC_MAX_DIGITOS:
+                    erros.append(
+                        f"Linha {linha_excel}: codigo do empregado/servico com mais de "
+                        f"{ALOC_MAX_DIGITOS} digitos."
+                    )
+                else:
+                    chave_aloc = (int(emp_aloc), dt_troca)
+                    existente = alocacoes.get(chave_aloc)
+                    if existente and existente[0] != cod_serv:
+                        erros.append(
+                            f"Linha {linha_excel}: Empregado {emp_aloc} com dois servicos "
+                            f"diferentes na mesma data ({dt_troca.strftime('%d/%m/%Y')}): "
+                            f"servico {existente[0]} (linha {existente[1]}) e servico {cod_serv}."
+                        )
+                    elif not existente:
+                        alocacoes[chave_aloc] = (cod_serv, linha_excel)
+                    # mesma (emp, serviço, data) repetida -> uma única alocação
+
+                    if competencia and (dt_troca.year * 100 + dt_troca.month) > int(competencia):
+                        avisos.append(
+                            f"AVISO linha {linha_excel}: data da troca "
+                            f"{dt_troca.strftime('%d/%m/%Y')} posterior à competência "
+                            f"{competencia[4:]}/{competencia[:4]}."
+                        )
+
+        # ---------- LANÇAMENTOS ----------
         if not tpcalc:
             continue
         if cod_emp:
@@ -510,6 +679,8 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                 continue
 
             if plano_saude.get(col, False):
+                if cod_serv:
+                    qtd_serv_saude_ignorado += 1
                 chave = (cod_emp, cod_evt, tpcalc or "11")
                 total_saude[chave] += int(valor)
                 reg10_saude[chave] = montar_registro(layout, "10", {
@@ -533,8 +704,29 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                     })
                 )
                 qtd_saude += 1
+
+            elif cod_serv:
+                # ---- Rateio por serviço: 10 (total) + 40 (por serviço) ----
+                chave = (cod_emp, cod_evt, tpcalc or "11")
+                linha_com_serv.setdefault(chave, linha_excel)
+                bloco = blocos_rateio.get(chave)
+                if bloco is None:
+                    bloco = {
+                        "empregado": cod_emp,
+                        "rubrica":   cod_evt,
+                        "tpcalc":    tpcalc or "11",
+                        "total":     0,
+                        "servicos":  {},     # ordem de inserção preservada
+                    }
+                    blocos_rateio[chave] = bloco
+                    itens_saida.append(bloco)
+                bloco["total"] += int(valor)
+                bloco["servicos"][cod_serv] = bloco["servicos"].get(cod_serv, 0) + int(valor)
+
             else:
-                linhas_saida.append(
+                chave = (cod_emp, cod_evt, tpcalc or "11")
+                linha_sem_serv.setdefault(chave, linha_excel)
+                itens_saida.append(
                     montar_registro(layout, "10", {
                         "empregado":   cod_emp,
                         "competencia": competencia,
@@ -546,55 +738,107 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                 )
                 qtd_normais += 1
 
+    # ---------- Consistência: mesma rubrica com e sem serviço ----------
+    for chave in sorted(set(linha_com_serv) & set(linha_sem_serv)):
+        emp, rub, _ = chave
+        erros.append(
+            f"Empregado {emp.lstrip('0')}, rubrica {rub}: há lançamentos com e sem "
+            f"Código Serviço (linhas {linha_com_serv[chave]} e {linha_sem_serv[chave]}). "
+            f"Informe o serviço em todas as linhas da rubrica ou em nenhuma."
+        )
+
+    # ---------- Empresa para a alocação ----------
+    empresa_aloc = cod_empresa.lstrip("0")
+    if alocacoes and len(empresa_aloc) > ALOC_MAX_DIGITOS:
+        erros.append(f"Codigo da empresa com mais de {ALOC_MAX_DIGITOS} digitos.")
+
+    for a in avisos:
+        log.append(a)
+    if qtd_serv_saude_ignorado:
+        log.append(
+            f"AVISO: {qtd_serv_saude_ignorado} lançamento(s) de plano de saúde com "
+            f"Código Serviço — rateio não aplicado a eventos de plano."
+        )
+
+    if erros:
+        for e in erros:
+            log.append(f"ERRO: {e}")
+        raise ValueError(
+            f"{len(erros)} inconsistência(s) encontrada(s). Nenhum arquivo foi gerado — "
+            f"corrija a planilha e gere novamente."
+        )
+
+    # ---------- Montagem do arquivo de eventos ----------
+    linhas_saida = []
+    qtd_reg40 = 0
+    for item in itens_saida:
+        if isinstance(item, str):
+            linhas_saida.append(item)
+            continue
+        linhas_saida.append(
+            montar_registro(layout, "10", {
+                "empregado":   item["empregado"],
+                "competencia": competencia,
+                "rubrica":     item["rubrica"],
+                "tpcalc":      item["tpcalc"],
+                "valor":       str(item["total"]).zfill(9),
+                "empresa":     cod_empresa,
+            })
+        )
+        for serv, v in item["servicos"].items():
+            linhas_saida.append(
+                montar_registro(layout, "40", {
+                    "servico": serv,
+                    "rubrica": item["rubrica"],
+                    "valor":   str(v).zfill(9),
+                })
+            )
+            qtd_reg40 += 1
+
     for chave in reg10_saude:
         linhas_saida.append(reg10_saude[chave])
         linhas_saida.append(reg20_saude[chave])
         for r25 in reg25_saude[chave]:
             linhas_saida.append(r25)
 
-    return linhas_saida, qtd_normais, qtd_saude
+    # ---------- Montagem do Alocacao.txt (ordem: colaborador, data) ----------
+    linhas_aloc = []
+    for (emp, dt), (serv, _) in sorted(alocacoes.items(), key=lambda x: x[0]):
+        campos = [empresa_aloc, str(emp), serv, dt.strftime("%d/%m/%Y")]
+        if ALOC_REGISTRO:
+            campos.insert(0, ALOC_REGISTRO)
+        linhas_aloc.append(ALOC_SEPARADOR.join(campos))
+
+    extras = {
+        "alocacao":   linhas_aloc,
+        "qtd_rateio": len(blocos_rateio),
+        "qtd_reg40":  qtd_reg40,
+    }
+    return linhas_saida, qtd_normais, qtd_saude, extras
 
 
 # ==============================
 # LEIAUTE 2 — funções exclusivas
 # ==============================
 def localizar_cabecalho_vertical(df):
-    """
-    Localiza as duas linhas de cabeçalho do Leiaute 2 e mapeia
-    os índices das colunas necessárias.
-
-    Estrutura real do .xls (col 0 repete o título por merge):
-      col0: título (ignorado)
-      col1: "Tipo de" / "Calculo"
-      col2: "Código"  / "Folha"
-      col3: "Nome dos"/ "Colaboradores"
-      col4: "Código"  / "Rubrica"   ← marcador central
-      col5: "Descrição"/"Rubrica"
-      col6: "Referência"/"Valor"
-
-    Retorna (linha_dados, dict_colunas).
-    """
     for i in range(len(df) - 1):
         linha_a = [normalizar(x) for x in df.iloc[i].tolist()]
         linha_b = [normalizar(x) for x in df.iloc[i + 1].tolist()]
         combinadas = [f"{a} {b}".strip() for a, b in zip(linha_a, linha_b)]
 
-        col_tipo    = None
-        col_emp     = None
-        col_rubrica = None
-        col_valor   = None
+        col_tipo = col_emp = col_rubrica = col_valor = None
 
         for col, comb in enumerate(combinadas):
             a = linha_a[col]
             b = linha_b[col]
-
+            if len(a) > LIMITE_CABECALHO or len(b) > LIMITE_CABECALHO:
+                continue
             if col_tipo is None and (
                 "tipo de calculo" in comb
                 or (a == "tipo de" and b == "calculo")
             ):
                 col_tipo = col
                 continue
-
             if col_emp is None and (
                 "codigo folha" in comb
                 or "codigo empregado" in comb
@@ -602,16 +846,12 @@ def localizar_cabecalho_vertical(df):
             ):
                 col_emp = col
                 continue
-
-            # Marcador central do Leiaute 2:
-            # rubrica lida da célula de dados, não do header horizontal
             if col_rubrica is None and (
                 "codigo rubrica" in comb
                 or (a == "codigo" and b == "rubrica")
             ):
                 col_rubrica = col
                 continue
-
             if col_valor is None and (
                 "referencia valor" in comb
                 or "referencia" in comb
@@ -636,12 +876,6 @@ def localizar_cabecalho_vertical(df):
 
 
 def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
-    """
-    Leiaute 2 — cada linha é um evento de um colaborador.
-    A rubrica vem da coluna 'Código Rubrica' de cada linha.
-    Gera apenas Registro 10.
-    Linhas com valor vazio ou zero são ignoradas.
-    """
     linha_dados, cols = localizar_cabecalho_vertical(df)
 
     col_tipo    = cols["col_tipo"]
@@ -691,13 +925,14 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     if qtd_ignoradas:
         log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
 
-    return linhas_saida, qtd_normais, 0
+    return linhas_saida, qtd_normais, 0, {"alocacao": [], "qtd_rateio": 0, "qtd_reg40": 0}
 
 
 # ==============================
 # PROCESSAMENTO PRINCIPAL
 # ==============================
 def processar_bytes(arquivo_bytes, log):
+    """Retorna (linhas_eventos, meta, linhas_alocacao)."""
     try:
         df = carregar_excel(arquivo_bytes)
 
@@ -712,28 +947,29 @@ def processar_bytes(arquivo_bytes, log):
             raise ValueError("Competência não encontrada.")
         log.append(f"Empresa: {cod_empresa}  |  Competência: {competencia}")
 
-        # ── Roteamento por leiaute detectado ──────────────────────────────
         if leiaute_chave == "importacao_arquivo_texto_lancamentos":
-            linhas_saida, qtd_normais, qtd_saude = processar_leiaute_horizontal(
+            linhas_saida, qtd_normais, qtd_saude, extras = processar_leiaute_horizontal(
                 df, layout, cod_empresa, competencia, log
             )
         elif leiaute_chave == "relacao_valores_vertical":
-            linhas_saida, qtd_normais, qtd_saude = processar_leiaute_vertical(
+            linhas_saida, qtd_normais, qtd_saude, extras = processar_leiaute_vertical(
                 df, layout, cod_empresa, competencia, log
             )
         else:
             raise ValueError(f"Leiaute '{leiaute_chave}' sem processador definido.")
-        # ──────────────────────────────────────────────────────────────────
 
         log.append(f"Eventos normais : {qtd_normais}")
+        log.append(f"Eventos c/ rateio: {extras['qtd_rateio']}")
+        log.append(f"Registros 40    : {extras['qtd_reg40']}")
         log.append(f"Eventos saúde   : {qtd_saude}")
         log.append(f"Total de linhas : {len(linhas_saida)}")
+        log.append(f"Alocações       : {len(extras['alocacao'])}")
 
-        return linhas_saida, {"empresa": cod_empresa, "competencia": competencia}
+        return linhas_saida, {"empresa": cod_empresa, "competencia": competencia}, extras["alocacao"]
 
     except Exception as e:
         log.append(f"ERRO: {e}")
-        return None, None
+        return None, None, None
 
 
 # ==============================
@@ -748,7 +984,6 @@ def main():
     )
     apply_tr_theme()
 
-    # ---------- cabeçalho ----------
     st.markdown(
         f"""
         <div style="background:#444444; padding:24px 28px 18px 28px; border-radius:8px;
@@ -816,60 +1051,60 @@ def main():
             <ul>
                 <li><b>Leiaute 1 — Horizontal</b>: eventos em colunas, gerado pelo
                     Domínio via <code>.bgr</code>. Suporta plano de saúde
-                    (registros 10 + 20 + 25).</li>
-                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento;
-                    colunas fixas <em>Tipo de Cálculo | Código Folha | Nome dos
-                    Colaboradores | Código Rubrica | Descrição Rubrica |
-                    Referência/Valor</em>.
-                    Aceita <code>.xls</code> e <code>.xlsx</code>.
+                    (registros 10 + 20 + 25) e <b>rateio por serviço</b>
+                    (registros 10 + 40).</li>
+                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento.
                     Gera apenas Registro 10.</li>
             </ul>
-            <p>O leiaute é identificado <b>automaticamente</b> pela estrutura
-            do cabeçalho — independente do nome da aba ou do arquivo.</p>
+
+            <h4>🔹 Rateio por serviço (Leiaute 1 — Sem Plano)</h4>
+            <ul>
+                <li><b>Código Serviço</b> preenchido → o evento gera o Registro 10 com o
+                    <b>total</b> e um Registro 40 por serviço.</li>
+                <li><b>Descrição Serviço</b> → apenas para conferência; não é importada.</li>
+                <li><b>Data da Troca</b> preenchida → gera também o arquivo
+                    <b>Alocacao.txt</b> (leiaute FOTROCAS_SERVICOS_IMPORTACAO).</li>
+                <li>Código Serviço em branco → lançamento padrão, sem vínculo com serviço.</li>
+                <li>Para mais de um serviço no mês, repita o colaborador em nova linha
+                    com o outro serviço, a data de início nele e os valores do serviço.</li>
+                <li>Pré-requisitos: serviços cadastrados e
+                    <b>Parâmetros &gt; Geral &gt; Cálculo &gt; Rateio por serviço = Sim</b>.</li>
+                <li>Importe <b>primeiro o Alocacao.txt</b> e depois o arquivo de eventos.</li>
+            </ul>
 
             <h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>
-            <p>No menu lateral, escolha o modelo adequado:</p>
             <ul>
                 <li><b>Sem Plano</b> → lançamentos sem plano de saúde.</li>
-                <li><b>Com Plano</b> → lançamentos com plano de saúde
-                    (gera registros 10 + 20 + 25).</li>
+                <li><b>Com Plano</b> → lançamentos com plano de saúde.</li>
             </ul>
 
             <h4>🔹 Passo 2 — Importar o modelo no Domínio Sistemas</h4>
-            <ol>
-                <li>Abra o <b>Domínio Sistemas / Folha</b>.</li>
-                <li>Acesse <b>Utilitários → Gerador de Relatórios → Importar</b>.</li>
-                <li>Selecione o arquivo <code>.bgr</code> baixado.</li>
-            </ol>
+            <p>Utilitários → Gerador de Relatórios → Importar → selecione o <code>.bgr</code>.</p>
 
             <h4>🔹 Passo 3 — Preencher e exportar a planilha</h4>
-            <ol>
-                <li>Execute o relatório no Domínio com a empresa e competência desejadas.</li>
-                <li>Exporte o resultado em formato <b>Excel (.xlsx ou .xls)</b>.</li>
-            </ol>
+            <p>Execute o relatório e exporte em <b>Excel (.xlsx ou .xls)</b>.</p>
 
-            <h4>🔹 Passo 4 — Gerar o arquivo TXT</h4>
-            <ol>
-                <li>Faça o <b>upload</b> do Excel exportado.</li>
-                <li>Clique em <b>▶ Gerar arquivo TXT</b>.</li>
-                <li>Baixe o arquivo gerado com o botão <b>⬇ Baixar arquivo TXT</b>.</li>
-            </ol>
+            <h4>🔹 Passo 4 — Gerar os arquivos TXT</h4>
+            <p>Faça o upload, clique em <b>▶ Gerar arquivo TXT</b> e baixe os arquivos.</p>
 
             <h4>🔹 Passo 5 — Importar no Domínio</h4>
-            <p>Folha → <b>Utilitários → Importação → de Arquivo Texto →
-            De Lançamentos</b>.</p>
+            <ol>
+                <li><b>Alocacao.txt</b> → rotina com o leiaute
+                    <i>Layout de importação de alocação</i>. Confira na tela
+                    <b>Alocação de Serviço</b>.</li>
+                <li><b>Eventos</b> → Folha → Utilitários → Importação → de Arquivo Texto →
+                    De Lançamentos.</li>
+            </ol>
 
             <hr>
-
             <h4>⚠ Observações</h4>
             <ul>
-                <li>Eventos de plano de saúde (Leiaute 1) geram registros
-                    <b>10 + 20 + 25</b> com valor acumulado (titular + dependentes).</li>
-                <li>Eventos normais geram apenas o registro <b>10</b>.</li>
-                <li>Linhas com <b>valor vazio ou zero</b> são ignoradas automaticamente.</li>
-                <li>O arquivo de saída é codificado em <b>UTF-8</b>.</li>
+                <li>Linhas com <b>valor vazio ou zero</b> são ignoradas.</li>
+                <li>Códigos de empresa, empregado e serviço na alocação: até <b>7 dígitos</b>.</li>
+                <li>Um colaborador não pode ter dois serviços diferentes na mesma data.</li>
+                <li>Linhas repetidas (mesmo colaborador, serviço e data) geram uma única alocação.</li>
+                <li>Se houver erro, nenhum arquivo é gerado: corrija e gere novamente.</li>
             </ul>
-
             </div>
             """,
             unsafe_allow_html=True,
@@ -878,21 +1113,21 @@ def main():
     st.markdown("---")
 
     # ---------- estado ----------
-    if "log_conv"  not in st.session_state:
-        st.session_state.log_conv  = [f"Aplicação pronta. Versão: {VERSAO}"]
-    if "txt_conv"  not in st.session_state:
-        st.session_state.txt_conv  = None
-    if "nome_conv" not in st.session_state:
-        st.session_state.nome_conv = "Eventos.txt"
+    defaults = {
+        "log_conv":  [f"Aplicação pronta. Versão: {VERSAO}"],
+        "txt_conv":  None,
+        "nome_conv": "Eventos.txt",
+        "txt_aloc":  None,
+        "nome_aloc": "Alocacao.txt",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    # ---------- upload ----------
     arquivo = st.file_uploader(
         "Excel de origem (.xlsx ou .xls)",
         type=["xlsx", "xls"],
-        help=(
-            "Leiaute 1 (horizontal) ou Leiaute 2 V2 (vertical). "
-            "Detectado automaticamente pelo cabeçalho da planilha."
-        ),
+        help="Leiaute 1 (horizontal) ou Leiaute 2 V2 (vertical). Detectado automaticamente.",
     )
 
     col1, col2 = st.columns([1, 1])
@@ -907,59 +1142,86 @@ def main():
         limpar = st.button("🗑 Limpar", use_container_width=True)
 
     if limpar:
-        st.session_state.log_conv  = ["Campos limpos."]
-        st.session_state.txt_conv  = None
-        st.session_state.nome_conv = "Eventos.txt"
+        for k, v in defaults.items():
+            st.session_state[k] = v
+        st.session_state.log_conv = ["Campos limpos."]
         st.rerun()
 
     if gerar and arquivo is not None:
         st.session_state.log_conv  = ["Iniciando processamento..."]
         st.session_state.txt_conv  = None
+        st.session_state.txt_aloc  = None
         st.session_state.nome_conv = "Eventos.txt"
+        st.session_state.nome_aloc = "Alocacao.txt"
 
-        linhas, meta = processar_bytes(arquivo.read(), st.session_state.log_conv)
+        linhas, meta, aloc = processar_bytes(arquivo.read(), st.session_state.log_conv)
 
-        if linhas and meta:
-            conteudo = "\n".join(linhas) + "\n"
-            st.session_state.txt_conv  = conteudo.encode("utf-8", errors="replace")
-            emp  = meta["empresa"]
-            comp = meta["competencia"]
-            st.session_state.nome_conv = f"{emp}_Eventos_{comp}.txt"
-            st.session_state.log_conv.append("Arquivo TXT gerado com sucesso.")
+        if meta:
+            emp, comp = meta["empresa"], meta["competencia"]
+            if linhas:
+                conteudo = "\n".join(linhas) + "\n"
+                st.session_state.txt_conv  = conteudo.encode("utf-8", errors="replace")
+                st.session_state.nome_conv = f"{emp}_Eventos_{comp}.txt"
+                st.session_state.log_conv.append("Arquivo de eventos gerado com sucesso.")
+            if aloc:
+                conteudo_aloc = "\n".join(aloc) + "\n"
+                st.session_state.txt_aloc  = conteudo_aloc.encode("utf-8", errors="replace")
+                st.session_state.nome_aloc = f"{emp}_Alocacao_{comp}.txt"
+                st.session_state.log_conv.append("Arquivo de alocação gerado com sucesso.")
+            if not linhas and not aloc:
+                st.session_state.log_conv.append("Nenhum lançamento ou alocação encontrado.")
 
         st.rerun()
 
-    # ---------- download do TXT ----------
-    if st.session_state.txt_conv is not None:
-        st.success("✅ Arquivo gerado com sucesso!")
-        st.download_button(
-            label="⬇ Baixar arquivo TXT",
-            data=st.session_state.txt_conv,
-            file_name=st.session_state.nome_conv,
-            mime="text/plain",
-            use_container_width=True,
-            type="primary",
-        )
+    # ---------- downloads ----------
+    if st.session_state.txt_conv is not None or st.session_state.txt_aloc is not None:
+        st.success("✅ Arquivo(s) gerado(s) com sucesso!")
+        d1, d2 = st.columns(2)
+        with d1:
+            if st.session_state.txt_conv is not None:
+                st.download_button(
+                    label="⬇ Baixar TXT de Eventos",
+                    data=st.session_state.txt_conv,
+                    file_name=st.session_state.nome_conv,
+                    mime="text/plain",
+                    use_container_width=True,
+                    type="primary",
+                    key="dl_eventos",
+                )
+        with d2:
+            if st.session_state.txt_aloc is not None:
+                st.download_button(
+                    label="⬇ Baixar TXT de Alocação",
+                    data=st.session_state.txt_aloc,
+                    file_name=st.session_state.nome_aloc,
+                    mime="text/plain",
+                    use_container_width=True,
+                    type="primary",
+                    key="dl_alocacao",
+                )
+        if st.session_state.txt_aloc is not None:
+            st.info("ℹ Importe primeiro o arquivo de **Alocação** e depois o de **Eventos**.")
 
     # ---------- métricas ----------
     log = st.session_state.log_conv
-    normais = saude = total = None
-    for linha in log:
-        if "Eventos normais" in linha:
-            try: normais = int(linha.split(":")[-1].strip())
-            except Exception: pass
-        if "Eventos saúde" in linha:
-            try: saude = int(linha.split(":")[-1].strip())
-            except Exception: pass
-        if "Total de linhas" in linha:
-            try: total = int(linha.split(":")[-1].strip())
-            except Exception: pass
 
+    def ler_metrica(rotulo):
+        for linha in log:
+            if linha.startswith(rotulo):
+                try:
+                    return int(linha.split(":")[-1].strip())
+                except Exception:
+                    return None
+        return None
+
+    normais = ler_metrica("Eventos normais")
     if normais is not None:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Eventos normais", normais)
-        c2.metric("Eventos saúde",   saude)
-        c3.metric("Total de linhas", total)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Eventos normais",   normais)
+        c2.metric("Eventos c/ rateio", ler_metrica("Eventos c/ rateio"))
+        c3.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
+        c4.metric("Total de linhas",   ler_metrica("Total de linhas"))
+        c5.metric("Alocações",         ler_metrica("Alocações"))
 
     # ---------- log ----------
     st.markdown("**Log de processamento**")
