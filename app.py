@@ -11,14 +11,13 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.3"
+VERSAO = "V1.4"
 
 # ==============================
-# CONFIGURAÇÃO DO ARQUIVO DE ALOCAÇÃO
-# (equivalente às linhas SEPARADOR / REGISTRO do Converter.bat)
+# LEIAUTE DO ARQUIVO DE ALOCAÇÃO
+# Ordem: Código Empresa <TAB> Código Empregado <TAB> Código Serviço <TAB> Data da Troca
 # ==============================
-ALOC_SEPARADOR   = "|"    # ex.: ";" se a rotina exigir ponto e vírgula
-ALOC_REGISTRO    = "10"   # use "" para gerar SEM o identificador
+ALOC_SEPARADOR   = "\t"   # tabulação
 ALOC_MAX_DIGITOS = 7
 
 # Células maiores que isso não são consideradas cabeçalho
@@ -553,7 +552,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     Leiaute 1.
     - Sem Código Serviço  -> Registro 10
     - Com Código Serviço  -> Registro 10 (total) + Registros 40 (por serviço)
-    - Com Data da Troca   -> linha no Alocacao.txt
+    - Com Data da Troca   -> linha no Alocacao.txt (tabulado)
     - Plano de saúde      -> 10 + 20 + 25 (sem rateio)
     """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
@@ -801,13 +800,17 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for r25 in reg25_saude[chave]:
             linhas_saida.append(r25)
 
-    # ---------- Montagem do Alocacao.txt (ordem: colaborador, data) ----------
+    # ---------- Montagem do Alocacao.txt (TABULADO) ----------
+    # Leiaute: Código Empresa <TAB> Código Empregado <TAB> Código Serviço <TAB> Data da Troca
+    # Ordem das linhas: colaborador e data da troca
     linhas_aloc = []
     for (emp, dt), (serv, _) in sorted(alocacoes.items(), key=lambda x: x[0]):
-        campos = [empresa_aloc, str(emp), serv, dt.strftime("%d/%m/%Y")]
-        if ALOC_REGISTRO:
-            campos.insert(0, ALOC_REGISTRO)
-        linhas_aloc.append(ALOC_SEPARADOR.join(campos))
+        linhas_aloc.append(ALOC_SEPARADOR.join([
+            empresa_aloc,               # Código Empresa
+            str(emp),                   # Código Empregado
+            serv,                       # Código Serviço
+            dt.strftime("%d/%m/%Y"),    # Data da Troca
+        ]))
 
     extras = {
         "alocacao":   linhas_aloc,
@@ -1035,6 +1038,19 @@ def main():
         else:
             st.info("Modelo 'Com Plano' indisponível.")
 
+        bgr_serv = carregar_bgr_bytes("bgr_base64_com_servico.txt")
+        if bgr_serv is not None:
+            st.download_button(
+                label="⬇ Relação De Valores — Com Serviço.bgr",
+                data=bgr_serv,
+                file_name="Relação De Valores Para Folha De Pagamento - Com servico.bgr",
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="btn_bgr_com_servico",
+            )
+        else:
+            st.info("Modelo 'Com Serviço' indisponível.")
+
         st.markdown("---")
         st.markdown("### ℹ Sobre")
         st.markdown(f"**Versão:** {VERSAO}")
@@ -1057,13 +1073,14 @@ def main():
                     Gera apenas Registro 10.</li>
             </ul>
 
-            <h4>🔹 Rateio por serviço (Leiaute 1 — Sem Plano)</h4>
+            <h4>🔹 Rateio por serviço (Leiaute 1)</h4>
             <ul>
                 <li><b>Código Serviço</b> preenchido → o evento gera o Registro 10 com o
                     <b>total</b> e um Registro 40 por serviço.</li>
                 <li><b>Descrição Serviço</b> → apenas para conferência; não é importada.</li>
                 <li><b>Data da Troca</b> preenchida → gera também o arquivo
-                    <b>Alocacao.txt</b> (leiaute FOTROCAS_SERVICOS_IMPORTACAO).</li>
+                    <b>Alocacao.txt</b>, <b>separado por tabulação</b>, na ordem:
+                    <code>Código Empresa | Código Empregado | Código Serviço | Data da Troca</code>.</li>
                 <li>Código Serviço em branco → lançamento padrão, sem vínculo com serviço.</li>
                 <li>Para mais de um serviço no mês, repita o colaborador em nova linha
                     com o outro serviço, a data de início nele e os valores do serviço.</li>
@@ -1076,6 +1093,8 @@ def main():
             <ul>
                 <li><b>Sem Plano</b> → lançamentos sem plano de saúde.</li>
                 <li><b>Com Plano</b> → lançamentos com plano de saúde.</li>
+                <li><b>Com Serviço</b> → lançamentos com rateio por serviço/tomador/obra
+                    (gera registros 10 + 40 e o Alocacao.txt).</li>
             </ul>
 
             <h4>🔹 Passo 2 — Importar o modelo no Domínio Sistemas</h4>
@@ -1167,7 +1186,9 @@ def main():
                 conteudo_aloc = "\n".join(aloc) + "\n"
                 st.session_state.txt_aloc  = conteudo_aloc.encode("utf-8", errors="replace")
                 st.session_state.nome_aloc = f"{emp}_Alocacao_{comp}.txt"
-                st.session_state.log_conv.append("Arquivo de alocação gerado com sucesso.")
+                st.session_state.log_conv.append(
+                    "Arquivo de alocação gerado com sucesso (separado por tabulação)."
+                )
             if not linhas and not aloc:
                 st.session_state.log_conv.append("Nenhum lançamento ou alocação encontrado.")
 
