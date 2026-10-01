@@ -11,7 +11,7 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.4"
+VERSAO = "V1.5"
 
 # ==============================
 # LEIAUTE DO ARQUIVO DE ALOCAÇÃO
@@ -23,6 +23,29 @@ ALOC_MAX_DIGITOS = 7
 # Células maiores que isso não são consideradas cabeçalho
 # (evita que textos de observação/instrução na planilha atrapalhem a detecção)
 LIMITE_CABECALHO = 40
+
+# ==============================
+# MODELOS DE PLANILHA (Leiaute 1 — horizontal)
+# chave: (tem_plano, tem_servico)
+# ==============================
+MODELOS = {
+    (False, False): "Importação de Eventos - Sem Plano",
+    (True,  False): "Importação de Eventos - Com Plano",
+    (False, True):  "Importação de Eventos - Serviço",
+    (True,  True):  "Importação de Eventos - Com Plano e Serviço",
+}
+
+# (rótulo do botão, arquivo base64 na pasta do app, nome do .bgr baixado, key)
+MODELOS_BGR = [
+    ("Sem Plano",           "bgr_base64_sem_plano.txt",
+     "Importação de Eventos - Sem Plano.bgr",           "btn_bgr_sem_plano"),
+    ("Com Plano",           "bgr_base64_com_plano.txt",
+     "Importação de Eventos - Com Plano.bgr",           "btn_bgr_com_plano"),
+    ("Serviço",             "bgr_base64_com_servico.txt",
+     "Importação de Eventos - Serviço.bgr",             "btn_bgr_servico"),
+    ("Com Plano e Serviço", "bgr_base64_com_plano_servico.txt",
+     "Importação de Eventos - Com Plano e Serviço.bgr", "btn_bgr_com_plano_servico"),
+]
 
 
 # ==============================
@@ -94,6 +117,21 @@ def apply_tr_theme():
         .instrucoes-box h4:first-child {
             margin-top: 0;
         }
+        .instrucoes-box table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 6px 0 10px 0;
+        }
+        .instrucoes-box th, .instrucoes-box td {
+            border: 1px solid #CCCCCC;
+            padding: 6px 8px;
+            text-align: left;
+            vertical-align: top;
+        }
+        .instrucoes-box th {
+            background-color: #FF8000;
+            color: #FFFFFF;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -108,8 +146,7 @@ def carregar_bgr_bytes(nome_arquivo_b64: str):
             b64 = f.read().strip()
         b64 = "".join(b64.split())
         return base64.b64decode(b64)
-    except Exception as e:
-        st.warning(f"⚠ Não foi possível carregar o modelo '{nome_arquivo_b64}': {e}")
+    except Exception:
         return None
 
 
@@ -270,14 +307,10 @@ def valor_para_layout(v, tamanho=9):
 LEIAUTES = {
     # -------------------------------------------------------
     # LEIAUTE 1 — Horizontal (eventos em colunas)
-    # + Registro 40 (rateio por serviço) e Alocacao.txt
+    # Modelos: Sem Plano | Com Plano | Serviço | Com Plano e Serviço
     # -------------------------------------------------------
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
-        "detector": {
-            "cabecalho": ["tipo de", "codigo", "competencia", "codigo empresa"],
-            "marcadores": ["folha", "colaboradores"],
-        },
         "registros": {
             # REGISTRO DE LANÇAMENTOS
             "10": [
@@ -289,10 +322,12 @@ LEIAUTES = {
                 ("valor",       9),
                 ("empresa",    10),
             ],
+            # PLANO DE SAÚDE — OPERADORA
             "20": [
                 ("fixo",            2, "20"),
                 ("cnpj_operadora", 14),
             ],
+            # PLANO DE SAÚDE — BENEFICIÁRIO
             "25": [
                 ("fixo",                2, "25"),
                 ("tipo_beneficiario",   1),
@@ -426,22 +461,24 @@ def localizar_estrutura(df):
     cab1 = cab2 = linha_plano = linha_cnpj = linha_dados = None
     for i in range(len(df)):
         row = [normalizar(x) for x in df.iloc[i].tolist()]
-        joined = " | ".join(row)
         celulas = [c for c in row if c and len(c) <= LIMITE_CABECALHO]
 
-        if cab1 is None and \
-           any(c.startswith("tipo de") for c in celulas) and \
-           any(c.startswith("codigo") for c in celulas):
-            cab1 = i
-            if i + 1 < len(df):
-                cab2 = i + 1
+        if cab1 is None:
+            if any(c.startswith("tipo de") for c in celulas) and \
+               any(c.startswith("codigo") for c in celulas):
+                cab1 = i
+                if i + 1 < len(df):
+                    cab2 = i + 1
             continue
-        if "evento de plano de saude" in joined:
+
+        # Linhas de plano de saúde: somente APÓS o cabeçalho
+        if linha_plano is None and any("evento de plano de saude" in c for c in celulas):
             linha_plano = i
             continue
-        if "cnpj da operadora de plano de saude" in joined:
+        if linha_cnpj is None and any("cnpj da operadora de plano de saude" in c for c in celulas):
             linha_cnpj = i
             continue
+
     if cab2 is not None:
         for i in range(cab2 + 1, len(df)):
             row = df.iloc[i].tolist()
@@ -481,9 +518,10 @@ def _eh_col_descricao_servico(a, b, comb):
 
 def detectar_colunas(df, cab1, cab2):
     """
-    Detecta 'Código Serviço', 'Descrição Serviço' e 'Data da Troca'
-    pelo cabeçalho, em qualquer posição. Nenhuma delas vira evento.
-    A Descrição Serviço é apenas para conferência (não é importada).
+    Detecta as colunas fixas e as opcionais pelo cabeçalho, em qualquer posição.
+    - Código Dependente: só existe nos modelos Com Plano (fica None nos demais).
+    - Código Serviço / Descrição Serviço / Data da Troca: modelos com Serviço.
+    Nenhuma delas vira evento. A Descrição Serviço é apenas para conferência.
     """
     linha1 = [texto(x) for x in df.iloc[cab1].tolist()]
     linha2 = [texto(x) for x in df.iloc[cab2].tolist()]
@@ -529,10 +567,12 @@ def detectar_colunas(df, cab1, cab2):
         ):
             col_data = col; continue
 
-    col_tipo = col_tipo or 0
-    col_emp  = col_emp  or 1
-    col_dep  = col_dep  or 2
-    col_nome = col_nome or 2
+    col_tipo = col_tipo if col_tipo is not None else 0
+    col_emp  = col_emp  if col_emp  is not None else 1
+    # col_dep permanece None quando a coluna não existe (Sem Plano / Serviço)
+    if col_nome is None:
+        col_nome = (col_dep if col_dep is not None else col_emp) + 1
+
     inicio_eventos = max(col_nome + 1, 3)
     for col in range(inicio_eventos, len(linha2)):
         cod_evt = so_numeros(linha2[col])
@@ -549,11 +589,11 @@ def detectar_colunas(df, cab1, cab2):
 
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     """
-    Leiaute 1.
-    - Sem Código Serviço  -> Registro 10
-    - Com Código Serviço  -> Registro 10 (total) + Registros 40 (por serviço)
-    - Com Data da Troca   -> linha no Alocacao.txt (tabulado)
-    - Plano de saúde      -> 10 + 20 + 25 (sem rateio)
+    Leiaute 1 — modelos:
+    - Sem Plano            -> Registro 10
+    - Com Plano            -> 10 + 20 + 25 (eventos de plano)
+    - Serviço              -> 10 (total) + 40 (por serviço) + Alocacao.txt
+    - Com Plano e Serviço  -> todas as regras acima (plano sem rateio)
     """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
     if cab1 is None or cab2 is None:
@@ -565,14 +605,31 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
      col_serv, col_desc_serv, col_data, eventos) = detectar_colunas(df, cab1, cab2)
     if not eventos:
         raise ValueError("Nenhum evento foi identificado no cabeçalho.")
+    if col_data is not None and col_serv is None:
+        raise ValueError(
+            "A coluna 'Data da Troca' foi encontrada, mas a coluna 'Código Serviço' não. "
+            "Verifique o cabeçalho da planilha."
+        )
+
+    # ---------- Identificação do modelo ----------
+    tem_plano = (linha_plano is not None) or (col_dep is not None)
+    tem_serv  = col_serv is not None
+    modelo    = MODELOS[(tem_plano, tem_serv)]
+    log.append(f"Modelo identificado: {modelo}")
     log.append(f"Colunas de eventos detectadas: {len(eventos)}")
 
     def _desc_col(c):
         return f"col {c + 1}" if c is not None else "não encontrada"
 
-    if col_serv is not None or col_data is not None or col_desc_serv is not None:
+    if tem_plano:
         log.append(
-            f"Colunas de serviço → Código Serviço: {_desc_col(col_serv)}"
+            f"Plano de saúde → Código Dependente: {_desc_col(col_dep)}"
+            f" | Linha 'Evento de Plano': {'sim' if linha_plano is not None else 'não encontrada'}"
+            f" | Linha 'CNPJ Operadora': {'sim' if linha_cnpj is not None else 'não encontrada'}"
+        )
+    if tem_serv:
+        log.append(
+            f"Serviço → Código Serviço: {_desc_col(col_serv)}"
             f" | Descrição Serviço: {_desc_col(col_desc_serv)} (só conferência)"
             f" | Data da Troca: {_desc_col(col_data)}"
         )
@@ -608,13 +665,24 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
 
         tpcalc  = so_numeros(row[col_tipo]) if col_tipo < len(row) else ""
         cod_emp = so_numeros(row[col_emp])  if col_emp  < len(row) else ""
-        cod_dep = so_numeros(row[col_dep])  if col_dep  < len(row) else ""
+        cod_dep = (so_numeros(row[col_dep])
+                   if (col_dep is not None and col_dep < len(row)) else "")
         cod_emp_proprio = cod_emp
 
         cod_serv = ""
         if col_serv is not None and col_serv < len(row):
             cod_serv = cod_num(row[col_serv]).lstrip("0")
         raw_data = row[col_data] if (col_data is not None and col_data < len(row)) else ""
+
+        # ---------- Serviço/Data só na linha do titular ----------
+        linha_dependente = (not cod_emp_proprio) and bool(cod_dep)
+        if linha_dependente and (cod_serv or texto(raw_data)):
+            erros.append(
+                f"Linha {linha_excel}: Código Serviço/Data da Troca informados em linha de "
+                f"dependente ({cod_dep}). Informe-os somente na linha do titular "
+                f"(Código Empregado)."
+            )
+            continue
 
         # ---------- ALOCAÇÃO (Data da Troca preenchida) ----------
         if col_data is not None:
@@ -813,6 +881,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         ]))
 
     extras = {
+        "modelo":     modelo,
         "alocacao":   linhas_aloc,
         "qtd_rateio": len(blocos_rateio),
         "qtd_reg40":  qtd_reg40,
@@ -886,6 +955,7 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     col_rubrica = cols["col_rubrica"]
     col_valor   = cols["col_valor"]
 
+    log.append(f"Modelo identificado: {layout['nome']}")
     log.append(
         f"Colunas detectadas → "
         f"tipo:{col_tipo} | emp:{col_emp} | rubrica:{col_rubrica} | valor:{col_valor}"
@@ -928,7 +998,9 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     if qtd_ignoradas:
         log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
 
-    return linhas_saida, qtd_normais, 0, {"alocacao": [], "qtd_rateio": 0, "qtd_reg40": 0}
+    return linhas_saida, qtd_normais, 0, {
+        "modelo": layout["nome"], "alocacao": [], "qtd_rateio": 0, "qtd_reg40": 0,
+    }
 
 
 # ==============================
@@ -968,7 +1040,12 @@ def processar_bytes(arquivo_bytes, log):
         log.append(f"Total de linhas : {len(linhas_saida)}")
         log.append(f"Alocações       : {len(extras['alocacao'])}")
 
-        return linhas_saida, {"empresa": cod_empresa, "competencia": competencia}, extras["alocacao"]
+        meta = {
+            "empresa":     cod_empresa,
+            "competencia": competencia,
+            "modelo":      extras["modelo"],
+        }
+        return linhas_saida, meta, extras["alocacao"]
 
     except Exception as e:
         log.append(f"ERRO: {e}")
@@ -997,7 +1074,7 @@ def main():
             <p style="color:#DDDDDD; margin:6px 0 0 0; font-family:'Segoe UI',Arial,sans-serif;">
                 Selecione o Excel de origem e clique em
                 <strong>Gerar arquivo TXT</strong>.
-                O leiaute é identificado <b>automaticamente</b>.
+                O modelo da planilha é identificado <b>automaticamente</b>.
             </p>
         </div>
         """,
@@ -1012,44 +1089,19 @@ def main():
             "e importe no **Domínio Sistemas**."
         )
 
-        bgr_sem = carregar_bgr_bytes("bgr_base64_sem_plano.txt")
-        if bgr_sem is not None:
-            st.download_button(
-                label="⬇ Relação De Valores — Sem Plano.bgr",
-                data=bgr_sem,
-                file_name="Relação De Valores Para Folha De Pagamento - Sem plano.bgr",
-                mime="application/octet-stream",
-                use_container_width=True,
-                key="btn_bgr_sem_plano",
-            )
-        else:
-            st.info("Modelo 'Sem Plano' indisponível.")
-
-        bgr_com = carregar_bgr_bytes("bgr_base64_com_plano.txt")
-        if bgr_com is not None:
-            st.download_button(
-                label="⬇ Relação De Valores — Com Plano.bgr",
-                data=bgr_com,
-                file_name="Relação De Valores Para Folha De Pagamento - Com plano.bgr",
-                mime="application/octet-stream",
-                use_container_width=True,
-                key="btn_bgr_com_plano",
-            )
-        else:
-            st.info("Modelo 'Com Plano' indisponível.")
-
-        bgr_serv = carregar_bgr_bytes("bgr_base64_com_servico.txt")
-        if bgr_serv is not None:
-            st.download_button(
-                label="⬇ Relação De Valores — Com Serviço.bgr",
-                data=bgr_serv,
-                file_name="Relação De Valores Para Folha De Pagamento - Com servico.bgr",
-                mime="application/octet-stream",
-                use_container_width=True,
-                key="btn_bgr_com_servico",
-            )
-        else:
-            st.info("Modelo 'Com Serviço' indisponível.")
+        for rotulo, arq_b64, nome_bgr, chave in MODELOS_BGR:
+            dados_bgr = carregar_bgr_bytes(arq_b64)
+            if dados_bgr is not None:
+                st.download_button(
+                    label=f"⬇ {rotulo}.bgr",
+                    data=dados_bgr,
+                    file_name=nome_bgr,
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                    key=chave,
+                )
+            else:
+                st.info(f"Modelo '{rotulo}' indisponível.")
 
         st.markdown("---")
         st.markdown("### ℹ Sobre")
@@ -1063,39 +1115,45 @@ def main():
             """
             <div class="instrucoes-box">
 
-            <h4>🔹 Leiautes suportados</h4>
-            <ul>
-                <li><b>Leiaute 1 — Horizontal</b>: eventos em colunas, gerado pelo
-                    Domínio via <code>.bgr</code>. Suporta plano de saúde
-                    (registros 10 + 20 + 25) e <b>rateio por serviço</b>
-                    (registros 10 + 40).</li>
-                <li><b>Leiaute 2 — Vertical (V2)</b>: cada linha é um evento.
-                    Gera apenas Registro 10.</li>
-            </ul>
+            <h4>🔹 Modelos de planilha (identificados automaticamente)</h4>
+            <table>
+                <tr><th>Modelo</th><th>Colunas</th><th>Arquivos gerados</th></tr>
+                <tr><td><b>Sem Plano</b></td>
+                    <td>Tipo de Cálculo, Código Folha, Nome dos Colaboradores, eventos</td>
+                    <td>Eventos (registro 10)</td></tr>
+                <tr><td><b>Com Plano</b></td>
+                    <td>+ Código Dependente e linhas "Evento de Plano de Saúde (Sim/Não)"
+                        e "CNPJ da Operadora"</td>
+                    <td>Eventos (10 + 20 + 25)</td></tr>
+                <tr><td><b>Serviço</b></td>
+                    <td>+ Código Serviço, Descrição Serviço, Data da Troca</td>
+                    <td>Eventos (10 + 40) + Alocação</td></tr>
+                <tr><td><b>Com Plano e Serviço</b></td>
+                    <td>Todas as colunas acima</td>
+                    <td>Eventos (10 + 20 + 25 + 40) + Alocação</td></tr>
+            </table>
+            <p>O <b>Leiaute 2 — Vertical (V2)</b> continua suportado (apenas registro 10).</p>
 
-            <h4>🔹 Rateio por serviço (Leiaute 1)</h4>
+            <h4>🔹 Rateio por serviço (modelos Serviço e Com Plano e Serviço)</h4>
             <ul>
-                <li><b>Código Serviço</b> preenchido → o evento gera o Registro 10 com o
-                    <b>total</b> e um Registro 40 por serviço.</li>
+                <li><b>Código Serviço</b> preenchido → Registro 10 com o <b>total</b> e
+                    um Registro 40 por serviço.</li>
                 <li><b>Descrição Serviço</b> → apenas para conferência; não é importada.</li>
-                <li><b>Data da Troca</b> preenchida → gera também o arquivo
-                    <b>Alocacao.txt</b>, <b>separado por tabulação</b>, na ordem:
+                <li><b>Data da Troca</b> preenchida → gera o <b>Alocacao.txt</b>,
+                    separado por tabulação, na ordem:
                     <code>Código Empresa | Código Empregado | Código Serviço | Data da Troca</code>.</li>
                 <li>Código Serviço em branco → lançamento padrão, sem vínculo com serviço.</li>
-                <li>Para mais de um serviço no mês, repita o colaborador em nova linha
-                    com o outro serviço, a data de início nele e os valores do serviço.</li>
+                <li>Mais de um serviço no mês: repita o colaborador em nova linha com o outro
+                    serviço, a data de início e o valor correspondente.</li>
+                <li>No modelo <b>Com Plano e Serviço</b>, informe serviço e data
+                    <b>somente na linha do titular</b>. Eventos de plano de saúde não são
+                    rateados por serviço.</li>
                 <li>Pré-requisitos: serviços cadastrados e
                     <b>Parâmetros &gt; Geral &gt; Cálculo &gt; Rateio por serviço = Sim</b>.</li>
-                <li>Importe <b>primeiro o Alocacao.txt</b> e depois o arquivo de eventos.</li>
             </ul>
 
             <h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>
-            <ul>
-                <li><b>Sem Plano</b> → lançamentos sem plano de saúde.</li>
-                <li><b>Com Plano</b> → lançamentos com plano de saúde.</li>
-                <li><b>Com Serviço</b> → lançamentos com rateio por serviço/tomador/obra
-                    (gera registros 10 + 40 e o Alocacao.txt).</li>
-            </ul>
+            <p>Na barra lateral, baixe o <code>.bgr</code> do modelo desejado.</p>
 
             <h4>🔹 Passo 2 — Importar o modelo no Domínio Sistemas</h4>
             <p>Utilitários → Gerador de Relatórios → Importar → selecione o <code>.bgr</code>.</p>
@@ -1108,7 +1166,7 @@ def main():
 
             <h4>🔹 Passo 5 — Importar no Domínio</h4>
             <ol>
-                <li><b>Alocacao.txt</b> → rotina com o leiaute
+                <li><b>Alocacao.txt</b> (se gerado) → rotina com o leiaute
                     <i>Layout de importação de alocação</i>. Confira na tela
                     <b>Alocação de Serviço</b>.</li>
                 <li><b>Eventos</b> → Folha → Utilitários → Importação → de Arquivo Texto →
@@ -1133,11 +1191,12 @@ def main():
 
     # ---------- estado ----------
     defaults = {
-        "log_conv":  [f"Aplicação pronta. Versão: {VERSAO}"],
-        "txt_conv":  None,
-        "nome_conv": "Eventos.txt",
-        "txt_aloc":  None,
-        "nome_aloc": "Alocacao.txt",
+        "log_conv":    [f"Aplicação pronta. Versão: {VERSAO}"],
+        "txt_conv":    None,
+        "nome_conv":   "Eventos.txt",
+        "txt_aloc":    None,
+        "nome_aloc":   "Alocacao.txt",
+        "modelo_conv": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1146,7 +1205,8 @@ def main():
     arquivo = st.file_uploader(
         "Excel de origem (.xlsx ou .xls)",
         type=["xlsx", "xls"],
-        help="Leiaute 1 (horizontal) ou Leiaute 2 V2 (vertical). Detectado automaticamente.",
+        help="Sem Plano, Com Plano, Serviço, Com Plano e Serviço ou Vertical V2. "
+             "Detectado automaticamente.",
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1167,16 +1227,18 @@ def main():
         st.rerun()
 
     if gerar and arquivo is not None:
-        st.session_state.log_conv  = ["Iniciando processamento..."]
-        st.session_state.txt_conv  = None
-        st.session_state.txt_aloc  = None
-        st.session_state.nome_conv = "Eventos.txt"
-        st.session_state.nome_aloc = "Alocacao.txt"
+        st.session_state.log_conv    = ["Iniciando processamento..."]
+        st.session_state.txt_conv    = None
+        st.session_state.txt_aloc    = None
+        st.session_state.nome_conv   = "Eventos.txt"
+        st.session_state.nome_aloc   = "Alocacao.txt"
+        st.session_state.modelo_conv = None
 
         linhas, meta, aloc = processar_bytes(arquivo.read(), st.session_state.log_conv)
 
         if meta:
             emp, comp = meta["empresa"], meta["competencia"]
+            st.session_state.modelo_conv = meta["modelo"]
             if linhas:
                 conteudo = "\n".join(linhas) + "\n"
                 st.session_state.txt_conv  = conteudo.encode("utf-8", errors="replace")
@@ -1196,7 +1258,9 @@ def main():
 
     # ---------- downloads ----------
     if st.session_state.txt_conv is not None or st.session_state.txt_aloc is not None:
-        st.success("✅ Arquivo(s) gerado(s) com sucesso!")
+        modelo_txt = (f" — modelo: **{st.session_state.modelo_conv}**"
+                      if st.session_state.modelo_conv else "")
+        st.success(f"✅ Arquivo(s) gerado(s) com sucesso{modelo_txt}")
         d1, d2 = st.columns(2)
         with d1:
             if st.session_state.txt_conv is not None:
