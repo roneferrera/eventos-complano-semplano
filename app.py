@@ -11,7 +11,7 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.5"
+VERSAO = "V1.6"
 
 # ==============================
 # LEIAUTE DO ARQUIVO DE ALOCAÇÃO
@@ -19,6 +19,15 @@ VERSAO = "V1.5"
 # ==============================
 ALOC_SEPARADOR   = "\t"   # tabulação
 ALOC_MAX_DIGITOS = 7
+
+# ==============================
+# REGISTRO 11 — DIAS DE FALTAS / REEMBOLSO DE FALTAS
+# Datas na célula do evento separadas por ';'  (ex.: 02/01/2026;03/01/2026)
+# Sufixo opcional "DSR" após a data -> tipo 2 (ex.: 04/01/2026 DSR)
+# ==============================
+FALTA_SEPARADOR   = ";"
+FALTA_TIPO_NORMAL = "1"
+FALTA_TIPO_DSR    = "2"
 
 # Células maiores que isso não são consideradas cabeçalho
 # (evita que textos de observação/instrução na planilha atrapalhem a detecção)
@@ -270,6 +279,93 @@ def parse_data(v):
     raise ValueError("data inválida")
 
 
+# ==============================
+# FALTAS — REGISTRO 11
+# ==============================
+_RE_DATA_BR    = re.compile(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4}")
+_RE_ITEM_FALTA = re.compile(
+    r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})"
+    r"\s*(?:[-–(]?\s*(dsr|d|normal|n)\s*\)?)?"
+)
+
+
+def extrair_datas_falta(v):
+    """
+    Lê a célula de um evento e verifica se ela contém datas de falta/reembolso.
+    - Retorna None  -> célula sem datas (valor numérico comum).
+    - Retorna lista [(date, tipo)] -> datas separadas por ';'.
+    - Lança ValueError se alguma parte não for uma data válida.
+    Tipo: 1 = Normal (padrão) | 2 = DSR (sufixo 'DSR' ou 'D' após a data).
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    # Data única digitada no Excel (convertida automaticamente em data)
+    if isinstance(v, (datetime, date)):
+        return [(date(v.year, v.month, v.day), FALTA_TIPO_NORMAL)]
+
+    s = texto(v)
+    if not s or not _RE_DATA_BR.search(s):
+        return None
+
+    itens = []
+    for parte in s.split(FALTA_SEPARADOR):
+        p = normalizar(parte)
+        if not p:
+            continue                          # ';' sobrando no final
+        m = _RE_ITEM_FALTA.fullmatch(p)
+        if not m:
+            raise ValueError(
+                f"'{parte.strip()}' não é uma data válida "
+                f"(use DD/MM/AAAA separadas por '{FALTA_SEPARADOR}')"
+            )
+        d, mth, y, sufixo = m.groups()
+        try:
+            dt = date(int(y), int(mth), int(d))
+        except ValueError:
+            raise ValueError(f"'{parte.strip()}' não é uma data existente")
+        tipo = FALTA_TIPO_DSR if sufixo in ("d", "dsr") else FALTA_TIPO_NORMAL
+        itens.append((dt, tipo))
+    return itens or None
+
+
+def validar_faltas(faltas, vistas, linha_excel, cod_evt, cod_emp, competencia, avisos):
+    """Datas repetidas -> erro. Datas após a competência -> aviso."""
+    erros = []
+    posteriores = []
+    for dt_f, _ in faltas:
+        if dt_f in vistas:
+            erros.append(
+                f"Linha {linha_excel}, evento {cod_evt}: data de falta "
+                f"{dt_f.strftime('%d/%m/%Y')} informada mais de uma vez para o "
+                f"empregado {cod_emp.lstrip('0')}."
+            )
+        vistas.add(dt_f)
+        if competencia and (dt_f.year * 100 + dt_f.month) > int(competencia):
+            posteriores.append(dt_f.strftime("%d/%m/%Y"))
+    if posteriores:
+        avisos.append(
+            f"AVISO linha {linha_excel}, evento {cod_evt}: data(s) de falta posterior(es) "
+            f"à competência {competencia[4:]}/{competencia[:4]}: {', '.join(posteriores)}."
+        )
+    return erros
+
+
+def montar_registros_falta(layout, faltas):
+    """Um Registro 11 para cada data informada."""
+    return [
+        montar_registro(layout, "11", {
+            "data_falta": dt_f.strftime("%Y%m%d"),
+            "tipo_falta": tipo,
+        })
+        for dt_f, tipo in faltas
+    ]
+
+
 def eh_sim(v):
     return normalizar(v) in ("sim", "s")
 
@@ -304,6 +400,23 @@ def valor_para_layout(v, tamanho=9):
 # ==============================
 # LEIAUTES
 # ==============================
+_REG_10 = [
+    ("fixo",        2,  "10"),
+    ("empregado",  10),
+    ("competencia", 6),
+    ("rubrica",     9),
+    ("tpcalc",      2),
+    ("valor",       9),
+    ("empresa",    10),
+]
+
+# REGISTRO DE DIAS DE FALTAS E DE REEMBOLSO DE FALTAS
+_REG_11 = [
+    ("fixo",        2, "11"),
+    ("data_falta",  8),        # AAAAMMDD
+    ("tipo_falta",  1),        # 1-Normal | 2-DSR
+]
+
 LEIAUTES = {
     # -------------------------------------------------------
     # LEIAUTE 1 — Horizontal (eventos em colunas)
@@ -312,16 +425,8 @@ LEIAUTES = {
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
         "registros": {
-            # REGISTRO DE LANÇAMENTOS
-            "10": [
-                ("fixo",        2,  "10"),
-                ("empregado",  10),
-                ("competencia", 6),
-                ("rubrica",     9),
-                ("tpcalc",      2),
-                ("valor",       9),
-                ("empresa",    10),
-            ],
+            "10": _REG_10,
+            "11": _REG_11,
             # PLANO DE SAÚDE — OPERADORA
             "20": [
                 ("fixo",            2, "20"),
@@ -350,15 +455,8 @@ LEIAUTES = {
     "relacao_valores_vertical": {
         "nome": "Relação de Valores Para Folha de Pagamento V2 | Vertical",
         "registros": {
-            "10": [
-                ("fixo",        2,  "10"),
-                ("empregado",  10),
-                ("competencia", 6),
-                ("rubrica",     9),
-                ("tpcalc",      2),
-                ("valor",       9),
-                ("empresa",    10),
-            ],
+            "10": _REG_10,
+            "11": _REG_11,
         },
     },
 }
@@ -397,7 +495,8 @@ def ajustar_campo_layout(nome, valor, tamanho):
     valor = "" if valor is None else str(valor)
     if nome in ("empregado", "empresa", "codigo_beneficiario", "servico"):
         return zfill_num(valor, tamanho)
-    if nome in ("rubrica", "tpcalc", "cnpj_operadora", "competencia", "valor"):
+    if nome in ("rubrica", "tpcalc", "cnpj_operadora", "competencia", "valor",
+                "data_falta", "tipo_falta"):
         return so_numeros(valor).zfill(tamanho)
     if nome == "tipo_beneficiario":
         return texto(valor)[:tamanho].ljust(tamanho)
@@ -590,9 +689,9 @@ def detectar_colunas(df, cab1, cab2):
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     """
     Leiaute 1 — modelos:
-    - Sem Plano            -> Registro 10
+    - Sem Plano            -> Registro 10 (+ 11 para datas de falta)
     - Com Plano            -> 10 + 20 + 25 (eventos de plano)
-    - Serviço              -> 10 (total) + 40 (por serviço) + Alocacao.txt
+    - Serviço              -> 10 (total) + 11 + 40 (por serviço) + Alocacao.txt
     - Com Plano e Serviço  -> todas as regras acima (plano sem rateio)
     """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
@@ -643,19 +742,20 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for col in eventos:
             cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
 
-    itens_saida      = []                 # str (registro pronto) ou dict (bloco 10+40)
-    blocos_rateio    = {}                 # (emp, rubrica, tpcalc) -> bloco
-    linha_com_serv   = {}                 # chave -> 1ª linha Excel com serviço
-    linha_sem_serv   = {}                 # chave -> 1ª linha Excel sem serviço
-    alocacoes        = {}                 # (emp_int, data) -> (servico, linha)
-    erros            = []
-    avisos           = []
-    ultimo_empregado = ""
-    total_saude      = defaultdict(int)
-    reg10_saude      = {}
-    reg20_saude      = {}
-    reg25_saude      = defaultdict(list)
-    qtd_normais = qtd_saude = qtd_serv_saude_ignorado = 0
+    itens_saida        = []               # str (registro pronto) ou dict (bloco 10+11+40)
+    blocos_rateio      = {}               # (emp, rubrica, tpcalc) -> bloco
+    linha_com_serv     = {}               # chave -> 1ª linha Excel com serviço
+    linha_sem_serv     = {}               # chave -> 1ª linha Excel sem serviço
+    alocacoes          = {}               # (emp_int, data) -> (servico, linha)
+    datas_falta_vistas = defaultdict(set) # chave -> datas já lançadas
+    erros              = []
+    avisos             = []
+    ultimo_empregado   = ""
+    total_saude        = defaultdict(int)
+    reg10_saude        = {}
+    reg20_saude        = {}
+    reg25_saude        = defaultdict(list)
+    qtd_normais = qtd_saude = qtd_serv_saude_ignorado = qtd_reg11 = 0
 
     for i in range(linha_dados, len(df)):
         row = df.iloc[i].tolist()
@@ -741,14 +841,43 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for col, cod_evt in eventos.items():
             if col >= len(row):
                 continue
-            valor = valor_para_layout(row[col], 9)
-            if not valor or int(valor) == 0:
+            celula = row[col]
+            chave  = (cod_emp, cod_evt, tpcalc or "11")
+
+            # ---- Datas de falta/reembolso (Registro 11) ----
+            try:
+                faltas = extrair_datas_falta(celula)
+            except ValueError as e:
+                erros.append(f"Linha {linha_excel}, evento {cod_evt}: {e}.")
                 continue
+
+            if faltas:
+                if plano_saude.get(col, False):
+                    erros.append(
+                        f"Linha {linha_excel}, evento {cod_evt}: datas de falta não são "
+                        f"permitidas em evento de plano de saúde."
+                    )
+                    continue
+                if linha_dependente:
+                    erros.append(
+                        f"Linha {linha_excel}, evento {cod_evt}: datas de falta informadas em "
+                        f"linha de dependente. Informe-as na linha do titular."
+                    )
+                    continue
+                erros.extend(validar_faltas(
+                    faltas, datas_falta_vistas[chave], linha_excel,
+                    cod_evt, cod_emp, competencia, avisos,
+                ))
+                valor = str(len(faltas) * 100).zfill(9)    # 1,00 por dia
+            else:
+                faltas = []
+                valor = valor_para_layout(celula, 9)
+                if not valor or int(valor) == 0:
+                    continue
 
             if plano_saude.get(col, False):
                 if cod_serv:
                     qtd_serv_saude_ignorado += 1
-                chave = (cod_emp, cod_evt, tpcalc or "11")
                 total_saude[chave] += int(valor)
                 reg10_saude[chave] = montar_registro(layout, "10", {
                     "empregado":   cod_emp,
@@ -773,8 +902,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                 qtd_saude += 1
 
             elif cod_serv:
-                # ---- Rateio por serviço: 10 (total) + 40 (por serviço) ----
-                chave = (cod_emp, cod_evt, tpcalc or "11")
+                # ---- Rateio por serviço: 10 (total) + 11 (faltas) + 40 (por serviço) ----
                 linha_com_serv.setdefault(chave, linha_excel)
                 bloco = blocos_rateio.get(chave)
                 if bloco is None:
@@ -784,14 +912,15 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                         "tpcalc":    tpcalc or "11",
                         "total":     0,
                         "servicos":  {},     # ordem de inserção preservada
+                        "faltas":    [],
                     }
                     blocos_rateio[chave] = bloco
                     itens_saida.append(bloco)
                 bloco["total"] += int(valor)
                 bloco["servicos"][cod_serv] = bloco["servicos"].get(cod_serv, 0) + int(valor)
+                bloco["faltas"].extend(faltas)
 
             else:
-                chave = (cod_emp, cod_evt, tpcalc or "11")
                 linha_sem_serv.setdefault(chave, linha_excel)
                 itens_saida.append(
                     montar_registro(layout, "10", {
@@ -803,6 +932,10 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                         "empresa":     cod_empresa,
                     })
                 )
+                # Um Registro 11 abaixo do colaborador para cada data informada
+                regs11 = montar_registros_falta(layout, faltas)
+                itens_saida.extend(regs11)
+                qtd_reg11 += len(regs11)
                 qtd_normais += 1
 
     # ---------- Consistência: mesma rubrica com e sem serviço ----------
@@ -852,6 +985,9 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                 "empresa":     cod_empresa,
             })
         )
+        regs11 = montar_registros_falta(layout, item["faltas"])
+        linhas_saida.extend(regs11)
+        qtd_reg11 += len(regs11)
         for serv, v in item["servicos"].items():
             linhas_saida.append(
                 montar_registro(layout, "40", {
@@ -885,6 +1021,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         "alocacao":   linhas_aloc,
         "qtd_rateio": len(blocos_rateio),
         "qtd_reg40":  qtd_reg40,
+        "qtd_reg11":  qtd_reg11,
     }
     return linhas_saida, qtd_normais, qtd_saude, extras
 
@@ -961,27 +1098,49 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
         f"tipo:{col_tipo} | emp:{col_emp} | rubrica:{col_rubrica} | valor:{col_valor}"
     )
 
-    linhas_saida  = []
-    qtd_normais   = 0
-    qtd_ignoradas = 0
+    linhas_saida       = []
+    qtd_normais        = 0
+    qtd_ignoradas      = 0
+    qtd_reg11          = 0
+    erros              = []
+    avisos             = []
+    datas_falta_vistas = defaultdict(set)
 
     for i in range(linha_dados, len(df)):
         row = df.iloc[i].tolist()
         if linha_vazia(row):
             continue
+        linha_excel = i + 1
 
         tpcalc  = so_numeros(row[col_tipo])    if col_tipo    < len(row) else ""
         cod_emp = so_numeros(row[col_emp])     if col_emp     < len(row) else ""
         rubrica = so_numeros(row[col_rubrica]) if col_rubrica < len(row) else ""
-        valor   = valor_para_layout(row[col_valor], 9) if col_valor < len(row) else ""
+        celula  = row[col_valor] if col_valor < len(row) else ""
 
         if not tpcalc or not cod_emp:
             continue
         if not rubrica:
             continue
-        if not valor or int(valor) == 0:
-            qtd_ignoradas += 1
+
+        # ---- Datas de falta/reembolso (Registro 11) ----
+        try:
+            faltas = extrair_datas_falta(celula)
+        except ValueError as e:
+            erros.append(f"Linha {linha_excel}, rubrica {rubrica}: {e}.")
             continue
+
+        if faltas:
+            erros.extend(validar_faltas(
+                faltas, datas_falta_vistas[(cod_emp, rubrica, tpcalc)], linha_excel,
+                rubrica, cod_emp, competencia, avisos,
+            ))
+            valor = str(len(faltas) * 100).zfill(9)
+        else:
+            faltas = []
+            valor = valor_para_layout(celula, 9)
+            if not valor or int(valor) == 0:
+                qtd_ignoradas += 1
+                continue
 
         linhas_saida.append(
             montar_registro(layout, "10", {
@@ -993,13 +1152,26 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
                 "empresa":     cod_empresa,
             })
         )
+        regs11 = montar_registros_falta(layout, faltas)
+        linhas_saida.extend(regs11)
+        qtd_reg11 += len(regs11)
         qtd_normais += 1
 
     if qtd_ignoradas:
         log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
+    for a in avisos:
+        log.append(a)
+    if erros:
+        for e in erros:
+            log.append(f"ERRO: {e}")
+        raise ValueError(
+            f"{len(erros)} inconsistência(s) encontrada(s). Nenhum arquivo foi gerado — "
+            f"corrija a planilha e gere novamente."
+        )
 
     return linhas_saida, qtd_normais, 0, {
-        "modelo": layout["nome"], "alocacao": [], "qtd_rateio": 0, "qtd_reg40": 0,
+        "modelo": layout["nome"], "alocacao": [], "qtd_rateio": 0,
+        "qtd_reg40": 0, "qtd_reg11": qtd_reg11,
     }
 
 
@@ -1035,6 +1207,7 @@ def processar_bytes(arquivo_bytes, log):
 
         log.append(f"Eventos normais : {qtd_normais}")
         log.append(f"Eventos c/ rateio: {extras['qtd_rateio']}")
+        log.append(f"Registros 11 (faltas): {extras['qtd_reg11']}")
         log.append(f"Registros 40    : {extras['qtd_reg40']}")
         log.append(f"Eventos saúde   : {qtd_saude}")
         log.append(f"Total de linhas : {len(linhas_saida)}")
@@ -1120,19 +1293,32 @@ def main():
                 <tr><th>Modelo</th><th>Colunas</th><th>Arquivos gerados</th></tr>
                 <tr><td><b>Sem Plano</b></td>
                     <td>Tipo de Cálculo, Código Folha, Nome dos Colaboradores, eventos</td>
-                    <td>Eventos (registro 10)</td></tr>
+                    <td>Eventos (registros 10 + 11)</td></tr>
                 <tr><td><b>Com Plano</b></td>
                     <td>+ Código Dependente e linhas "Evento de Plano de Saúde (Sim/Não)"
                         e "CNPJ da Operadora"</td>
-                    <td>Eventos (10 + 20 + 25)</td></tr>
+                    <td>Eventos (10 + 11 + 20 + 25)</td></tr>
                 <tr><td><b>Serviço</b></td>
                     <td>+ Código Serviço, Descrição Serviço, Data da Troca</td>
-                    <td>Eventos (10 + 40) + Alocação</td></tr>
+                    <td>Eventos (10 + 11 + 40) + Alocação</td></tr>
                 <tr><td><b>Com Plano e Serviço</b></td>
                     <td>Todas as colunas acima</td>
-                    <td>Eventos (10 + 20 + 25 + 40) + Alocação</td></tr>
+                    <td>Eventos (10 + 11 + 20 + 25 + 40) + Alocação</td></tr>
             </table>
-            <p>O <b>Leiaute 2 — Vertical (V2)</b> continua suportado (apenas registro 10).</p>
+            <p>O <b>Leiaute 2 — Vertical (V2)</b> continua suportado (registros 10 + 11).</p>
+
+            <h4>🔹 Dias de faltas e reembolso de faltas (Registro 11)</h4>
+            <ul>
+                <li>Na coluna do evento, informe as <b>datas no formato DD/MM/AAAA
+                    separadas por ponto e vírgula (;)</b>. Ex.: <code>02/01/2026;03/01/2026</code>.</li>
+                <li>É gerado o Registro 10 com a <b>quantidade de dias</b> (1,00 por data) e,
+                    logo abaixo, <b>um Registro 11 para cada data</b>.</li>
+                <li>Falta de DSR: escreva <code>DSR</code> após a data
+                    (ex.: <code>04/01/2026 DSR</code>) → tipo 2. Sem indicação → tipo 1 (Normal).</li>
+                <li>Se informar apenas um número (ex.: <code>2,00</code>), é gerado só o
+                    Registro 10, sem as datas.</li>
+                <li>A mesma data não pode ser repetida para o mesmo colaborador e evento.</li>
+            </ul>
 
             <h4>🔹 Rateio por serviço (modelos Serviço e Com Plano e Serviço)</h4>
             <ul>
@@ -1301,12 +1487,13 @@ def main():
 
     normais = ler_metrica("Eventos normais")
     if normais is not None:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Eventos normais",   normais)
         c2.metric("Eventos c/ rateio", ler_metrica("Eventos c/ rateio"))
-        c3.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
-        c4.metric("Total de linhas",   ler_metrica("Total de linhas"))
-        c5.metric("Alocações",         ler_metrica("Alocações"))
+        c3.metric("Faltas (reg. 11)",  ler_metrica("Registros 11"))
+        c4.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
+        c5.metric("Total de linhas",   ler_metrica("Total de linhas"))
+        c6.metric("Alocações",         ler_metrica("Alocações"))
 
     # ---------- log ----------
     st.markdown("**Log de processamento**")
