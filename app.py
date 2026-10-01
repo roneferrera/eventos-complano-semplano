@@ -11,7 +11,7 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.6"
+VERSAO = "V1.7"
 
 # ==============================
 # LEIAUTE DO ARQUIVO DE ALOCAÇÃO
@@ -22,15 +22,23 @@ ALOC_MAX_DIGITOS = 7
 
 # ==============================
 # REGISTRO 11 — DIAS DE FALTAS / REEMBOLSO DE FALTAS
-# Datas na célula do evento separadas por ';'  (ex.: 02/01/2026;03/01/2026)
-# Sufixo opcional "DSR" após a data -> tipo 2 (ex.: 04/01/2026 DSR)
+# Leiaute Domínio: 001-002 "11" | 003-010 Data AAAAMMDD | 011-011 Tipo (1-Normal, 2-DSR)
+# Na célula do evento: datas DD/MM/AAAA separadas por ';' (ou quebra de linha / '|')
+# Indicador DSR antes ou depois da data -> tipo 2
+#   Ex.: 02/01/2026 DSR;03/01/2026  |  DSR 02/01/2026  |  02/01/2026-DSR  |  02/01/2026 (D.S.R.)
+# Válido para TODOS os modelos (Sem Plano, Com Plano, Serviço, Com Plano e Serviço, Vertical V2)
 # ==============================
 FALTA_SEPARADOR   = ";"
 FALTA_TIPO_NORMAL = "1"
 FALTA_TIPO_DSR    = "2"
+NOMES_TIPO_FALTA  = {FALTA_TIPO_NORMAL: "Normal", FALTA_TIPO_DSR: "DSR"}
+
+INDICADORES_DSR = {
+    "dsr", "d", "descanso", "descansosemanal", "descansosemanalremunerado",
+}
+INDICADORES_NORMAL = {"", "n", "normal"}
 
 # Células maiores que isso não são consideradas cabeçalho
-# (evita que textos de observação/instrução na planilha atrapalhem a detecção)
 LIMITE_CABECALHO = 40
 
 # ==============================
@@ -44,7 +52,6 @@ MODELOS = {
     (True,  True):  "Importação de Eventos - Com Plano e Serviço",
 }
 
-# (rótulo do botão, arquivo base64 na pasta do app, nome do .bgr baixado, key)
 MODELOS_BGR = [
     ("Sem Plano",           "bgr_base64_sem_plano.txt",
      "Importação de Eventos - Sem Plano.bgr",           "btn_bgr_sem_plano"),
@@ -67,80 +74,36 @@ def apply_tr_theme():
             font-family: 'Segoe UI', 'Arial', sans-serif;
             color: #444444;
         }
-        h1, h2, h3 {
-            color: #FF8000;
-            font-weight: 700;
-        }
-        section[data-testid="stSidebar"] {
-            background-color: #444444;
-            color: #FFFFFF;
-        }
-        section[data-testid="stSidebar"] * {
-            color: #FFFFFF !important;
-        }
+        h1, h2, h3 { color: #FF8000; font-weight: 700; }
+        section[data-testid="stSidebar"] { background-color: #444444; color: #FFFFFF; }
+        section[data-testid="stSidebar"] * { color: #FFFFFF !important; }
         .stButton > button {
-            background-color: #FF8000;
-            color: #FFFFFF;
-            border: none;
-            border-radius: 4px;
-            font-weight: bold;
+            background-color: #FF8000; color: #FFFFFF; border: none;
+            border-radius: 4px; font-weight: bold;
         }
-        .stButton > button:hover {
-            background-color: #D64001;
-            color: #FFFFFF;
-        }
+        .stButton > button:hover { background-color: #D64001; color: #FFFFFF; }
         .stDownloadButton > button {
-            background-color: #FF8000;
-            color: #FFFFFF;
-            border: none;
-            border-radius: 4px;
-            font-weight: bold;
+            background-color: #FF8000; color: #FFFFFF; border: none;
+            border-radius: 4px; font-weight: bold;
         }
-        .stDownloadButton > button:hover {
-            background-color: #D64001;
-            color: #FFFFFF;
-        }
-        hr {
-            border-color: #FF8000;
-        }
+        .stDownloadButton > button:hover { background-color: #D64001; color: #FFFFFF; }
+        hr { border-color: #FF8000; }
         [data-testid="metric-container"] {
-            background-color: #E9E9E9;
-            border-left: 4px solid #FF8000;
-            border-radius: 4px;
-            padding: 10px;
+            background-color: #E9E9E9; border-left: 4px solid #FF8000;
+            border-radius: 4px; padding: 10px;
         }
         .instrucoes-box {
-            background-color: #E9E9E9;
-            border-left: 4px solid #FF8000;
-            border-radius: 4px;
-            padding: 16px 20px;
-            margin: 12px 0;
-            color: #444444;
-            font-family: 'Segoe UI', Arial, sans-serif;
+            background-color: #E9E9E9; border-left: 4px solid #FF8000;
+            border-radius: 4px; padding: 16px 20px; margin: 12px 0;
+            color: #444444; font-family: 'Segoe UI', Arial, sans-serif;
         }
-        .instrucoes-box h4 {
-            color: #FF8000;
-            margin-top: 14px;
-            margin-bottom: 6px;
-        }
-        .instrucoes-box h4:first-child {
-            margin-top: 0;
-        }
-        .instrucoes-box table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 6px 0 10px 0;
-        }
+        .instrucoes-box h4 { color: #FF8000; margin-top: 14px; margin-bottom: 6px; }
+        .instrucoes-box h4:first-child { margin-top: 0; }
+        .instrucoes-box table { border-collapse: collapse; width: 100%; margin: 6px 0 10px 0; }
         .instrucoes-box th, .instrucoes-box td {
-            border: 1px solid #CCCCCC;
-            padding: 6px 8px;
-            text-align: left;
-            vertical-align: top;
+            border: 1px solid #CCCCCC; padding: 6px 8px; text-align: left; vertical-align: top;
         }
-        .instrucoes-box th {
-            background-color: #FF8000;
-            color: #FFFFFF;
-        }
+        .instrucoes-box th { background-color: #FF8000; color: #FFFFFF; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -162,6 +125,15 @@ def carregar_bgr_bytes(nome_arquivo_b64: str):
 # ==============================
 # UTILITÁRIOS
 # ==============================
+# Caracteres invisíveis removidos e espaços especiais convertidos em espaço comum
+_INVISIVEIS = {ord(c): None for c in "\u200b\u200c\u200d\u2060\ufeff\u00ad"}
+_ESPACOS    = {ord(c): " " for c in "\u00a0\u202f\u2007\u2009\u200a\t"}
+
+
+def limpar_invisiveis(s):
+    return str(s).translate(_INVISIVEIS).translate(_ESPACOS).replace("\uff1b", ";")
+
+
 def texto(v):
     if v is None:
         return ""
@@ -170,7 +142,7 @@ def texto(v):
             return ""
     except Exception:
         pass
-    s = str(v).strip()
+    s = limpar_invisiveis(v).strip()
     return "" if s.lower() == "nan" else s
 
 
@@ -246,7 +218,6 @@ def parse_data(v):
     """
     Converte a célula 'Data da Troca' em date.
     Retorna None se vazia. Lança ValueError se inválida.
-    Aceita: datetime/Timestamp, serial do Excel, 'DD/MM/AAAA', 'AAAA-MM-DD'.
     """
     if v is None:
         return None
@@ -255,23 +226,23 @@ def parse_data(v):
             return None
     except Exception:
         pass
-    if isinstance(v, (datetime, date)):          # pd.Timestamp herda de datetime
+    if isinstance(v, (datetime, date)):
         return date(v.year, v.month, v.day)
     if isinstance(v, (int, float)) and not isinstance(v, bool):
-        if 1 <= v <= 2958465:                    # serial de data do Excel
+        if 1 <= v <= 2958465:
             d = datetime(1899, 12, 30) + timedelta(days=int(v))
             return d.date()
         raise ValueError("data inválida")
     s = texto(v)
     if not s:
         return None
-    if s.isdigit() and len(s) == 5:              # serial do Excel como texto
+    if s.isdigit() and len(s) == 5:
         d = datetime(1899, 12, 30) + timedelta(days=int(s))
         return d.date()
     m = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})(?:\s+.*)?", s)
     if m:
         d, mth, y = map(int, m.groups())
-        return date(y, mth, d)                   # ValueError se inexistente
+        return date(y, mth, d)
     m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?", s)
     if m:
         y, mth, d = map(int, m.groups())
@@ -280,22 +251,34 @@ def parse_data(v):
 
 
 # ==============================
-# FALTAS — REGISTRO 11
+# FALTAS — REGISTRO 11 (todos os modelos)
 # ==============================
-_RE_DATA_BR    = re.compile(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4}")
-_RE_ITEM_FALTA = re.compile(
-    r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})"
-    r"\s*(?:[-–(]?\s*(dsr|d|normal|n)\s*\)?)?"
-)
+_RE_DATA_FALTA = re.compile(r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{4})")
+_RE_SEP_FALTA  = re.compile(r"[;\n\r|]+")
+
+
+def _tipo_por_indicador(parte, resto):
+    """Define o tipo da falta pelo texto que sobra ao redor da data."""
+    resto_norm = normalizar(resto)
+    if re.search(r"\d", resto_norm):
+        raise ValueError(f"'{parte}' contém números além da data")
+    indicador = re.sub(r"[^a-z]", "", resto_norm)      # 'd.s.r.' / '(dsr)' -> 'dsr'
+    if indicador in INDICADORES_DSR:
+        return FALTA_TIPO_DSR
+    if indicador in INDICADORES_NORMAL:
+        return FALTA_TIPO_NORMAL
+    raise ValueError(
+        f"indicador '{resto_norm.strip()}' em '{parte}' não reconhecido "
+        f"(escreva DSR para falta de DSR ou deixe somente a data para Normal)"
+    )
 
 
 def extrair_datas_falta(v):
     """
-    Lê a célula de um evento e verifica se ela contém datas de falta/reembolso.
-    - Retorna None  -> célula sem datas (valor numérico comum).
-    - Retorna lista [(date, tipo)] -> datas separadas por ';'.
-    - Lança ValueError se alguma parte não for uma data válida.
-    Tipo: 1 = Normal (padrão) | 2 = DSR (sufixo 'DSR' ou 'D' após a data).
+    Lê a célula de um evento e verifica se contém datas de falta/reembolso.
+    - None  -> célula sem datas (valor numérico comum).
+    - lista [(date, tipo)] -> uma entrada por data.
+    - ValueError -> conteúdo inválido (nunca assume Normal silenciosamente).
     """
     if v is None:
         return None
@@ -304,33 +287,52 @@ def extrair_datas_falta(v):
             return None
     except Exception:
         pass
-    # Data única digitada no Excel (convertida automaticamente em data)
-    if isinstance(v, (datetime, date)):
+    if isinstance(v, (datetime, date)):                 # data única convertida pelo Excel
         return [(date(v.year, v.month, v.day), FALTA_TIPO_NORMAL)]
 
     s = texto(v)
-    if not s or not _RE_DATA_BR.search(s):
+    if not s:
+        return None
+    if not _RE_DATA_FALTA.search(s):
+        if "dsr" in re.sub(r"[^a-z]", "", normalizar(s)):
+            raise ValueError(f"'{s}' indica DSR, mas não contém data (use DD/MM/AAAA DSR)")
         return None
 
     itens = []
-    for parte in s.split(FALTA_SEPARADOR):
-        p = normalizar(parte)
-        if not p:
-            continue                          # ';' sobrando no final
-        m = _RE_ITEM_FALTA.fullmatch(p)
-        if not m:
+    for parte in _RE_SEP_FALTA.split(s):
+        parte = parte.strip()
+        if not parte:
+            continue                                    # ';' sobrando
+        datas = list(_RE_DATA_FALTA.finditer(parte))
+        if not datas:
             raise ValueError(
-                f"'{parte.strip()}' não é uma data válida "
+                f"'{parte}' não contém uma data válida "
                 f"(use DD/MM/AAAA separadas por '{FALTA_SEPARADOR}')"
             )
-        d, mth, y, sufixo = m.groups()
+        if len(datas) > 1:
+            raise ValueError(
+                f"'{parte}' contém mais de uma data — separe as datas com '{FALTA_SEPARADOR}'"
+            )
+        m = datas[0]
+        d, mth, y = map(int, m.groups())
         try:
-            dt = date(int(y), int(mth), int(d))
+            dt = date(y, mth, d)
         except ValueError:
-            raise ValueError(f"'{parte.strip()}' não é uma data existente")
-        tipo = FALTA_TIPO_DSR if sufixo in ("d", "dsr") else FALTA_TIPO_NORMAL
+            raise ValueError(f"'{m.group(0)}' não é uma data existente")
+        resto = parte[:m.start()] + " " + parte[m.end():]
+        tipo = _tipo_por_indicador(parte, resto)
         itens.append((dt, tipo))
     return itens or None
+
+
+def descrever_faltas(faltas):
+    return ", ".join(
+        f"{dt.strftime('%d/%m/%Y')} ({NOMES_TIPO_FALTA[t]})" for dt, t in faltas
+    )
+
+
+def contar_dsr(faltas):
+    return sum(1 for _, t in faltas if t == FALTA_TIPO_DSR)
 
 
 def validar_faltas(faltas, vistas, linha_excel, cod_evt, cod_emp, competencia, avisos):
@@ -410,7 +412,6 @@ _REG_10 = [
     ("empresa",    10),
 ]
 
-# REGISTRO DE DIAS DE FALTAS E DE REEMBOLSO DE FALTAS
 _REG_11 = [
     ("fixo",        2, "11"),
     ("data_falta",  8),        # AAAAMMDD
@@ -418,28 +419,21 @@ _REG_11 = [
 ]
 
 LEIAUTES = {
-    # -------------------------------------------------------
-    # LEIAUTE 1 — Horizontal (eventos em colunas)
-    # Modelos: Sem Plano | Com Plano | Serviço | Com Plano e Serviço
-    # -------------------------------------------------------
     "importacao_arquivo_texto_lancamentos": {
         "nome": "Importação Arquivo Texto | De Lançamentos",
         "registros": {
             "10": _REG_10,
             "11": _REG_11,
-            # PLANO DE SAÚDE — OPERADORA
             "20": [
                 ("fixo",            2, "20"),
                 ("cnpj_operadora", 14),
             ],
-            # PLANO DE SAÚDE — BENEFICIÁRIO
             "25": [
                 ("fixo",                2, "25"),
                 ("tipo_beneficiario",   1),
                 ("codigo_beneficiario", 10),
                 ("valor",               9),
             ],
-            # REGISTRO DE INFORMAÇÃO DE LANÇAMENTO POR SERVIÇO
             "40": [
                 ("fixo",     2, "40"),
                 ("servico", 10),
@@ -448,10 +442,6 @@ LEIAUTES = {
             ],
         },
     },
-
-    # -------------------------------------------------------
-    # LEIAUTE 2 — Relação de Valores V2 (vertical)
-    # -------------------------------------------------------
     "relacao_valores_vertical": {
         "nome": "Relação de Valores Para Folha de Pagamento V2 | Vertical",
         "registros": {
@@ -474,17 +464,14 @@ def detectar_leiaute(df):
             for a, b in zip(linha_a, linha_b)
             if len(a) <= LIMITE_CABECALHO and len(b) <= LIMITE_CABECALHO
         ]
-
         tem_codigo_rubrica = any("codigo rubrica" in c for c in combinadas)
         tem_referencia     = any(
-            "referencia valor" in c or
-            "referencia" in c or
+            "referencia valor" in c or "referencia" in c or
             c.strip() in ("referencia", "valor")
             for c in combinadas
         )
         if tem_codigo_rubrica and tem_referencia:
             return "relacao_valores_vertical"
-
     return "importacao_arquivo_texto_lancamentos"
 
 
@@ -498,8 +485,6 @@ def ajustar_campo_layout(nome, valor, tamanho):
     if nome in ("rubrica", "tpcalc", "cnpj_operadora", "competencia", "valor",
                 "data_falta", "tipo_falta"):
         return so_numeros(valor).zfill(tamanho)
-    if nome == "tipo_beneficiario":
-        return texto(valor)[:tamanho].ljust(tamanho)
     return texto(valor)[:tamanho].ljust(tamanho)
 
 
@@ -570,7 +555,6 @@ def localizar_estrutura(df):
                     cab2 = i + 1
             continue
 
-        # Linhas de plano de saúde: somente APÓS o cabeçalho
         if linha_plano is None and any("evento de plano de saude" in c for c in celulas):
             linha_plano = i
             continue
@@ -594,7 +578,6 @@ _ALVOS_SERVICO = ("servico", "tomador", "obra")
 
 
 def _primeiro_termo(b):
-    """'servico/tomador/obra' -> 'servico'"""
     return b.split("/")[0].strip()
 
 
@@ -616,12 +599,6 @@ def _eh_col_descricao_servico(a, b, comb):
 
 
 def detectar_colunas(df, cab1, cab2):
-    """
-    Detecta as colunas fixas e as opcionais pelo cabeçalho, em qualquer posição.
-    - Código Dependente: só existe nos modelos Com Plano (fica None nos demais).
-    - Código Serviço / Descrição Serviço / Data da Troca: modelos com Serviço.
-    Nenhuma delas vira evento. A Descrição Serviço é apenas para conferência.
-    """
     linha1 = [texto(x) for x in df.iloc[cab1].tolist()]
     linha2 = [texto(x) for x in df.iloc[cab2].tolist()]
     col_tipo = col_emp = col_dep = col_nome = None
@@ -635,19 +612,16 @@ def detectar_colunas(df, cab1, cab2):
         combinado = f"{a} {b}".strip()
 
         if col_tipo is None and (
-            "tipo de calculo" in combinado or
-            (a == "tipo de" and b == "calculo")
+            "tipo de calculo" in combinado or (a == "tipo de" and b == "calculo")
         ):
             col_tipo = col; continue
         if col_emp is None and (
-            "codigo empregado" in combinado or
-            "codigo folha" in combinado or
+            "codigo empregado" in combinado or "codigo folha" in combinado or
             (a == "codigo" and b in ("empregado", "folha"))
         ):
             col_emp = col; continue
         if col_dep is None and (
-            "codigo dependente" in combinado or
-            (a == "codigo" and b == "dependente")
+            "codigo dependente" in combinado or (a == "codigo" and b == "dependente")
         ):
             col_dep = col; continue
         if col_nome is None and (
@@ -660,15 +634,13 @@ def detectar_colunas(df, cab1, cab2):
         if col_desc_serv is None and _eh_col_descricao_servico(a, b, combinado):
             col_desc_serv = col; continue
         if col_data is None and (
-            "data da troca" in combinado or
-            combinado == "data troca" or
+            "data da troca" in combinado or combinado == "data troca" or
             (a == "data da" and b == "troca")
         ):
             col_data = col; continue
 
     col_tipo = col_tipo if col_tipo is not None else 0
     col_emp  = col_emp  if col_emp  is not None else 1
-    # col_dep permanece None quando a coluna não existe (Sem Plano / Serviço)
     if col_nome is None:
         col_nome = (col_dep if col_dep is not None else col_emp) + 1
 
@@ -688,11 +660,11 @@ def detectar_colunas(df, cab1, cab2):
 
 def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
     """
-    Leiaute 1 — modelos:
-    - Sem Plano            -> Registro 10 (+ 11 para datas de falta)
-    - Com Plano            -> 10 + 20 + 25 (eventos de plano)
+    Leiaute 1 — modelos (todos com regra de faltas / Registro 11):
+    - Sem Plano            -> 10 (+ 11)
+    - Com Plano            -> 10 (+ 11) + 20 + 25 (eventos de plano, sem faltas)
     - Serviço              -> 10 (total) + 11 + 40 (por serviço) + Alocacao.txt
-    - Com Plano e Serviço  -> todas as regras acima (plano sem rateio)
+    - Com Plano e Serviço  -> todas as regras acima
     """
     cab1, cab2, linha_plano, linha_cnpj, linha_dados = localizar_estrutura(df)
     if cab1 is None or cab2 is None:
@@ -710,7 +682,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
             "Verifique o cabeçalho da planilha."
         )
 
-    # ---------- Identificação do modelo ----------
     tem_plano = (linha_plano is not None) or (col_dep is not None)
     tem_serv  = col_serv is not None
     modelo    = MODELOS[(tem_plano, tem_serv)]
@@ -742,20 +713,21 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for col in eventos:
             cnpj_operadora[col] = so_numeros(df.iloc[linha_cnpj, col])
 
-    itens_saida        = []               # str (registro pronto) ou dict (bloco 10+11+40)
-    blocos_rateio      = {}               # (emp, rubrica, tpcalc) -> bloco
-    linha_com_serv     = {}               # chave -> 1ª linha Excel com serviço
-    linha_sem_serv     = {}               # chave -> 1ª linha Excel sem serviço
-    alocacoes          = {}               # (emp_int, data) -> (servico, linha)
-    datas_falta_vistas = defaultdict(set) # chave -> datas já lançadas
+    itens_saida        = []
+    blocos_rateio      = {}
+    linha_com_serv     = {}
+    linha_sem_serv     = {}
+    alocacoes          = {}
+    datas_falta_vistas = defaultdict(set)
     erros              = []
     avisos             = []
+    info_faltas        = []
     ultimo_empregado   = ""
     total_saude        = defaultdict(int)
     reg10_saude        = {}
     reg20_saude        = {}
     reg25_saude        = defaultdict(list)
-    qtd_normais = qtd_saude = qtd_serv_saude_ignorado = qtd_reg11 = 0
+    qtd_normais = qtd_saude = qtd_serv_saude_ignorado = qtd_reg11 = qtd_dsr = 0
 
     for i in range(linha_dados, len(df)):
         row = df.iloc[i].tolist()
@@ -774,7 +746,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
             cod_serv = cod_num(row[col_serv]).lstrip("0")
         raw_data = row[col_data] if (col_data is not None and col_data < len(row)) else ""
 
-        # ---------- Serviço/Data só na linha do titular ----------
         linha_dependente = (not cod_emp_proprio) and bool(cod_dep)
         if linha_dependente and (cod_serv or texto(raw_data)):
             erros.append(
@@ -784,7 +755,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
             )
             continue
 
-        # ---------- ALOCAÇÃO (Data da Troca preenchida) ----------
+        # ---------- ALOCAÇÃO ----------
         if col_data is not None:
             dt_troca = None
             try:
@@ -819,7 +790,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                         )
                     elif not existente:
                         alocacoes[chave_aloc] = (cod_serv, linha_excel)
-                    # mesma (emp, serviço, data) repetida -> uma única alocação
 
                     if competencia and (dt_troca.year * 100 + dt_troca.month) > int(competencia):
                         avisos.append(
@@ -868,6 +838,10 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                     faltas, datas_falta_vistas[chave], linha_excel,
                     cod_evt, cod_emp, competencia, avisos,
                 ))
+                info_faltas.append(
+                    f"Faltas → linha {linha_excel}, empregado {cod_emp.lstrip('0')}, "
+                    f"evento {cod_evt}: {descrever_faltas(faltas)}"
+                )
                 valor = str(len(faltas) * 100).zfill(9)    # 1,00 por dia
             else:
                 faltas = []
@@ -902,7 +876,6 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                 qtd_saude += 1
 
             elif cod_serv:
-                # ---- Rateio por serviço: 10 (total) + 11 (faltas) + 40 (por serviço) ----
                 linha_com_serv.setdefault(chave, linha_excel)
                 bloco = blocos_rateio.get(chave)
                 if bloco is None:
@@ -911,7 +884,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                         "rubrica":   cod_evt,
                         "tpcalc":    tpcalc or "11",
                         "total":     0,
-                        "servicos":  {},     # ordem de inserção preservada
+                        "servicos":  {},
                         "faltas":    [],
                     }
                     blocos_rateio[chave] = bloco
@@ -932,13 +905,12 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
                         "empresa":     cod_empresa,
                     })
                 )
-                # Um Registro 11 abaixo do colaborador para cada data informada
                 regs11 = montar_registros_falta(layout, faltas)
                 itens_saida.extend(regs11)
                 qtd_reg11 += len(regs11)
+                qtd_dsr   += contar_dsr(faltas)
                 qtd_normais += 1
 
-    # ---------- Consistência: mesma rubrica com e sem serviço ----------
     for chave in sorted(set(linha_com_serv) & set(linha_sem_serv)):
         emp, rub, _ = chave
         erros.append(
@@ -947,13 +919,12 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
             f"Informe o serviço em todas as linhas da rubrica ou em nenhuma."
         )
 
-    # ---------- Empresa para a alocação ----------
     empresa_aloc = cod_empresa.lstrip("0")
     if alocacoes and len(empresa_aloc) > ALOC_MAX_DIGITOS:
         erros.append(f"Codigo da empresa com mais de {ALOC_MAX_DIGITOS} digitos.")
 
-    for a in avisos:
-        log.append(a)
+    log.extend(info_faltas)
+    log.extend(avisos)
     if qtd_serv_saude_ignorado:
         log.append(
             f"AVISO: {qtd_serv_saude_ignorado} lançamento(s) de plano de saúde com "
@@ -988,6 +959,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         regs11 = montar_registros_falta(layout, item["faltas"])
         linhas_saida.extend(regs11)
         qtd_reg11 += len(regs11)
+        qtd_dsr   += contar_dsr(item["faltas"])
         for serv, v in item["servicos"].items():
             linhas_saida.append(
                 montar_registro(layout, "40", {
@@ -1004,16 +976,13 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         for r25 in reg25_saude[chave]:
             linhas_saida.append(r25)
 
-    # ---------- Montagem do Alocacao.txt (TABULADO) ----------
-    # Leiaute: Código Empresa <TAB> Código Empregado <TAB> Código Serviço <TAB> Data da Troca
-    # Ordem das linhas: colaborador e data da troca
     linhas_aloc = []
     for (emp, dt), (serv, _) in sorted(alocacoes.items(), key=lambda x: x[0]):
         linhas_aloc.append(ALOC_SEPARADOR.join([
-            empresa_aloc,               # Código Empresa
-            str(emp),                   # Código Empregado
-            serv,                       # Código Serviço
-            dt.strftime("%d/%m/%Y"),    # Data da Troca
+            empresa_aloc,
+            str(emp),
+            serv,
+            dt.strftime("%d/%m/%Y"),
         ]))
 
     extras = {
@@ -1022,6 +991,7 @@ def processar_leiaute_horizontal(df, layout, cod_empresa, competencia, log):
         "qtd_rateio": len(blocos_rateio),
         "qtd_reg40":  qtd_reg40,
         "qtd_reg11":  qtd_reg11,
+        "qtd_dsr":    qtd_dsr,
     }
     return linhas_saida, qtd_normais, qtd_saude, extras
 
@@ -1043,29 +1013,24 @@ def localizar_cabecalho_vertical(df):
             if len(a) > LIMITE_CABECALHO or len(b) > LIMITE_CABECALHO:
                 continue
             if col_tipo is None and (
-                "tipo de calculo" in comb
-                or (a == "tipo de" and b == "calculo")
+                "tipo de calculo" in comb or (a == "tipo de" and b == "calculo")
             ):
                 col_tipo = col
                 continue
             if col_emp is None and (
-                "codigo folha" in comb
-                or "codigo empregado" in comb
-                or (a == "codigo" and b in ("folha", "empregado"))
+                "codigo folha" in comb or "codigo empregado" in comb or
+                (a == "codigo" and b in ("folha", "empregado"))
             ):
                 col_emp = col
                 continue
             if col_rubrica is None and (
-                "codigo rubrica" in comb
-                or (a == "codigo" and b == "rubrica")
+                "codigo rubrica" in comb or (a == "codigo" and b == "rubrica")
             ):
                 col_rubrica = col
                 continue
             if col_valor is None and (
-                "referencia valor" in comb
-                or "referencia" in comb
-                or b in ("valor", "referencia")
-                or a in ("referencia", "valor")
+                "referencia valor" in comb or "referencia" in comb or
+                b in ("valor", "referencia") or a in ("referencia", "valor")
             ):
                 col_valor = col
                 continue
@@ -1102,8 +1067,10 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
     qtd_normais        = 0
     qtd_ignoradas      = 0
     qtd_reg11          = 0
+    qtd_dsr            = 0
     erros              = []
     avisos             = []
+    info_faltas        = []
     datas_falta_vistas = defaultdict(set)
 
     for i in range(linha_dados, len(df)):
@@ -1117,12 +1084,9 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
         rubrica = so_numeros(row[col_rubrica]) if col_rubrica < len(row) else ""
         celula  = row[col_valor] if col_valor < len(row) else ""
 
-        if not tpcalc or not cod_emp:
-            continue
-        if not rubrica:
+        if not tpcalc or not cod_emp or not rubrica:
             continue
 
-        # ---- Datas de falta/reembolso (Registro 11) ----
         try:
             faltas = extrair_datas_falta(celula)
         except ValueError as e:
@@ -1134,6 +1098,10 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
                 faltas, datas_falta_vistas[(cod_emp, rubrica, tpcalc)], linha_excel,
                 rubrica, cod_emp, competencia, avisos,
             ))
+            info_faltas.append(
+                f"Faltas → linha {linha_excel}, empregado {cod_emp.lstrip('0')}, "
+                f"rubrica {rubrica}: {descrever_faltas(faltas)}"
+            )
             valor = str(len(faltas) * 100).zfill(9)
         else:
             faltas = []
@@ -1155,12 +1123,13 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
         regs11 = montar_registros_falta(layout, faltas)
         linhas_saida.extend(regs11)
         qtd_reg11 += len(regs11)
+        qtd_dsr   += contar_dsr(faltas)
         qtd_normais += 1
 
     if qtd_ignoradas:
         log.append(f"Linhas ignoradas (valor vazio/zero): {qtd_ignoradas}")
-    for a in avisos:
-        log.append(a)
+    log.extend(info_faltas)
+    log.extend(avisos)
     if erros:
         for e in erros:
             log.append(f"ERRO: {e}")
@@ -1171,7 +1140,7 @@ def processar_leiaute_vertical(df, layout, cod_empresa, competencia, log):
 
     return linhas_saida, qtd_normais, 0, {
         "modelo": layout["nome"], "alocacao": [], "qtd_rateio": 0,
-        "qtd_reg40": 0, "qtd_reg11": qtd_reg11,
+        "qtd_reg40": 0, "qtd_reg11": qtd_reg11, "qtd_dsr": qtd_dsr,
     }
 
 
@@ -1208,6 +1177,7 @@ def processar_bytes(arquivo_bytes, log):
         log.append(f"Eventos normais : {qtd_normais}")
         log.append(f"Eventos c/ rateio: {extras['qtd_rateio']}")
         log.append(f"Registros 11 (faltas): {extras['qtd_reg11']}")
+        log.append(f"Faltas DSR (tipo 2): {extras['qtd_dsr']}")
         log.append(f"Registros 40    : {extras['qtd_reg40']}")
         log.append(f"Eventos saúde   : {qtd_saude}")
         log.append(f"Total de linhas : {len(linhas_saida)}")
@@ -1254,14 +1224,12 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ---------- sidebar ----------
     with st.sidebar:
         st.markdown("### 📥 Modelos de Planilha")
         st.markdown(
             "Baixe o modelo correspondente ao seu tipo de lançamento "
             "e importe no **Domínio Sistemas**."
         )
-
         for rotulo, arq_b64, nome_bgr, chave in MODELOS_BGR:
             dados_bgr = carregar_bgr_bytes(arq_b64)
             if dados_bgr is not None:
@@ -1282,7 +1250,6 @@ def main():
         st.markdown("**Thomson Reuters**")
         st.markdown("**Domínio Sistemas**")
 
-    # ---------- instruções ----------
     with st.expander("📖 **Instruções de Uso** — clique para expandir", expanded=False):
         st.markdown(
             """
@@ -1293,7 +1260,7 @@ def main():
                 <tr><th>Modelo</th><th>Colunas</th><th>Arquivos gerados</th></tr>
                 <tr><td><b>Sem Plano</b></td>
                     <td>Tipo de Cálculo, Código Folha, Nome dos Colaboradores, eventos</td>
-                    <td>Eventos (registros 10 + 11)</td></tr>
+                    <td>Eventos (10 + 11)</td></tr>
                 <tr><td><b>Com Plano</b></td>
                     <td>+ Código Dependente e linhas "Evento de Plano de Saúde (Sim/Não)"
                         e "CNPJ da Operadora"</td>
@@ -1304,68 +1271,57 @@ def main():
                 <tr><td><b>Com Plano e Serviço</b></td>
                     <td>Todas as colunas acima</td>
                     <td>Eventos (10 + 11 + 20 + 25 + 40) + Alocação</td></tr>
+                <tr><td><b>Vertical V2</b></td>
+                    <td>Tipo de Cálculo, Código Folha, Código Rubrica, Referência/Valor</td>
+                    <td>Eventos (10 + 11)</td></tr>
             </table>
-            <p>O <b>Leiaute 2 — Vertical (V2)</b> continua suportado (registros 10 + 11).</p>
 
-            <h4>🔹 Dias de faltas e reembolso de faltas (Registro 11)</h4>
+            <h4>🔹 Dias de faltas e reembolso de faltas (Registro 11) — todos os modelos</h4>
             <ul>
-                <li>Na coluna do evento, informe as <b>datas no formato DD/MM/AAAA
-                    separadas por ponto e vírgula (;)</b>. Ex.: <code>02/01/2026;03/01/2026</code>.</li>
-                <li>É gerado o Registro 10 com a <b>quantidade de dias</b> (1,00 por data) e,
+                <li>Na célula do evento (ou em Referência/Valor no V2), informe as datas
+                    <b>DD/MM/AAAA separadas por ponto e vírgula (;)</b>.
+                    Ex.: <code>02/01/2026;03/01/2026</code>.</li>
+                <li><b>Falta de DSR (tipo 2):</b> escreva <code>DSR</code> junto da data —
+                    antes ou depois. Ex.: <code>02/01/2026 DSR</code>, <code>DSR 02/01/2026</code>,
+                    <code>02/01/2026-DSR</code>, <code>02/01/2026 (D.S.R.)</code>.</li>
+                <li>Somente a data → tipo 1 (Normal).</li>
+                <li>Gera o Registro 10 com a <b>quantidade de dias</b> (1,00 por data) e,
                     logo abaixo, <b>um Registro 11 para cada data</b>.</li>
-                <li>Falta de DSR: escreva <code>DSR</code> após a data
-                    (ex.: <code>04/01/2026 DSR</code>) → tipo 2. Sem indicação → tipo 1 (Normal).</li>
-                <li>Se informar apenas um número (ex.: <code>2,00</code>), é gerado só o
-                    Registro 10, sem as datas.</li>
-                <li>A mesma data não pode ser repetida para o mesmo colaborador e evento.</li>
+                <li>Texto não reconhecido ao lado da data gera <b>erro</b> (nunca vira Normal sem aviso).</li>
+                <li>O log mostra cada data com o tipo gerado — confira antes de importar.</li>
+                <li>Apenas um número (ex.: <code>2,00</code>) → só o Registro 10, sem datas.</li>
+                <li>A mesma data não pode se repetir para o mesmo colaborador e evento.</li>
+                <li>Não permitido em eventos de plano de saúde nem em linhas de dependente.</li>
             </ul>
 
             <h4>🔹 Rateio por serviço (modelos Serviço e Com Plano e Serviço)</h4>
             <ul>
-                <li><b>Código Serviço</b> preenchido → Registro 10 com o <b>total</b> e
-                    um Registro 40 por serviço.</li>
-                <li><b>Descrição Serviço</b> → apenas para conferência; não é importada.</li>
-                <li><b>Data da Troca</b> preenchida → gera o <b>Alocacao.txt</b>,
-                    separado por tabulação, na ordem:
+                <li><b>Código Serviço</b> preenchido → Registro 10 com o <b>total</b>,
+                    Registros 11 das faltas e um Registro 40 por serviço.</li>
+                <li><b>Descrição Serviço</b> → apenas para conferência.</li>
+                <li><b>Data da Troca</b> preenchida → gera o <b>Alocacao.txt</b> (tabulado):
                     <code>Código Empresa | Código Empregado | Código Serviço | Data da Troca</code>.</li>
-                <li>Código Serviço em branco → lançamento padrão, sem vínculo com serviço.</li>
-                <li>Mais de um serviço no mês: repita o colaborador em nova linha com o outro
-                    serviço, a data de início e o valor correspondente.</li>
-                <li>No modelo <b>Com Plano e Serviço</b>, informe serviço e data
-                    <b>somente na linha do titular</b>. Eventos de plano de saúde não são
-                    rateados por serviço.</li>
+                <li>Código Serviço em branco → lançamento padrão.</li>
+                <li>No modelo <b>Com Plano e Serviço</b>, serviço e data <b>somente na linha do titular</b>.</li>
                 <li>Pré-requisitos: serviços cadastrados e
                     <b>Parâmetros &gt; Geral &gt; Cálculo &gt; Rateio por serviço = Sim</b>.</li>
             </ul>
 
-            <h4>🔹 Passo 1 — Baixar o modelo de planilha</h4>
-            <p>Na barra lateral, baixe o <code>.bgr</code> do modelo desejado.</p>
-
-            <h4>🔹 Passo 2 — Importar o modelo no Domínio Sistemas</h4>
-            <p>Utilitários → Gerador de Relatórios → Importar → selecione o <code>.bgr</code>.</p>
-
-            <h4>🔹 Passo 3 — Preencher e exportar a planilha</h4>
-            <p>Execute o relatório e exporte em <b>Excel (.xlsx ou .xls)</b>.</p>
-
-            <h4>🔹 Passo 4 — Gerar os arquivos TXT</h4>
-            <p>Faça o upload, clique em <b>▶ Gerar arquivo TXT</b> e baixe os arquivos.</p>
-
-            <h4>🔹 Passo 5 — Importar no Domínio</h4>
+            <h4>🔹 Passos</h4>
             <ol>
-                <li><b>Alocacao.txt</b> (se gerado) → rotina com o leiaute
-                    <i>Layout de importação de alocação</i>. Confira na tela
-                    <b>Alocação de Serviço</b>.</li>
-                <li><b>Eventos</b> → Folha → Utilitários → Importação → de Arquivo Texto →
-                    De Lançamentos.</li>
+                <li>Baixe o <code>.bgr</code> do modelo na barra lateral.</li>
+                <li>Domínio: Utilitários → Gerador de Relatórios → Importar → selecione o <code>.bgr</code>.</li>
+                <li>Execute o relatório, preencha e exporte em <b>Excel (.xlsx ou .xls)</b>.</li>
+                <li>Faça o upload e clique em <b>▶ Gerar arquivo TXT</b>.</li>
+                <li>Importe primeiro o <b>Alocacao.txt</b> (se houver) e depois os <b>Eventos</b>
+                    (Folha → Utilitários → Importação → de Arquivo Texto → De Lançamentos).</li>
             </ol>
 
             <hr>
             <h4>⚠ Observações</h4>
             <ul>
                 <li>Linhas com <b>valor vazio ou zero</b> são ignoradas.</li>
-                <li>Códigos de empresa, empregado e serviço na alocação: até <b>7 dígitos</b>.</li>
-                <li>Um colaborador não pode ter dois serviços diferentes na mesma data.</li>
-                <li>Linhas repetidas (mesmo colaborador, serviço e data) geram uma única alocação.</li>
+                <li>Códigos na alocação: até <b>7 dígitos</b>.</li>
                 <li>Se houver erro, nenhum arquivo é gerado: corrija e gere novamente.</li>
             </ul>
             </div>
@@ -1375,7 +1331,6 @@ def main():
 
     st.markdown("---")
 
-    # ---------- estado ----------
     defaults = {
         "log_conv":    [f"Aplicação pronta. Versão: {VERSAO}"],
         "txt_conv":    None,
@@ -1413,7 +1368,7 @@ def main():
         st.rerun()
 
     if gerar and arquivo is not None:
-        st.session_state.log_conv    = ["Iniciando processamento..."]
+        st.session_state.log_conv    = [f"Iniciando processamento... ({VERSAO})"]
         st.session_state.txt_conv    = None
         st.session_state.txt_aloc    = None
         st.session_state.nome_conv   = "Eventos.txt"
@@ -1442,7 +1397,6 @@ def main():
 
         st.rerun()
 
-    # ---------- downloads ----------
     if st.session_state.txt_conv is not None or st.session_state.txt_aloc is not None:
         modelo_txt = (f" — modelo: **{st.session_state.modelo_conv}**"
                       if st.session_state.modelo_conv else "")
@@ -1473,7 +1427,15 @@ def main():
         if st.session_state.txt_aloc is not None:
             st.info("ℹ Importe primeiro o arquivo de **Alocação** e depois o de **Eventos**.")
 
-    # ---------- métricas ----------
+        if st.session_state.txt_conv is not None:
+            with st.expander("🔎 Pré-visualizar TXT de Eventos "
+                             "(Registro 11: posição 11 = tipo — 1 Normal | 2 DSR)"):
+                linhas_prev = st.session_state.txt_conv.decode(
+                    "utf-8", errors="replace").splitlines()
+                st.code("\n".join(linhas_prev[:500]), language=None)
+                if len(linhas_prev) > 500:
+                    st.caption(f"Exibindo 500 de {len(linhas_prev)} linhas.")
+
     log = st.session_state.log_conv
 
     def ler_metrica(rotulo):
@@ -1487,15 +1449,15 @@ def main():
 
     normais = ler_metrica("Eventos normais")
     if normais is not None:
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("Eventos normais",   normais)
         c2.metric("Eventos c/ rateio", ler_metrica("Eventos c/ rateio"))
         c3.metric("Faltas (reg. 11)",  ler_metrica("Registros 11"))
-        c4.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
-        c5.metric("Total de linhas",   ler_metrica("Total de linhas"))
-        c6.metric("Alocações",         ler_metrica("Alocações"))
+        c4.metric("Faltas DSR",        ler_metrica("Faltas DSR"))
+        c5.metric("Eventos saúde",     ler_metrica("Eventos saúde"))
+        c6.metric("Total de linhas",   ler_metrica("Total de linhas"))
+        c7.metric("Alocações",         ler_metrica("Alocações"))
 
-    # ---------- log ----------
     st.markdown("**Log de processamento**")
     log_texto = "\n".join(log)
     tem_erro  = any(str(l).startswith("ERRO") for l in log)
