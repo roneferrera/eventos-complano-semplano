@@ -2,6 +2,8 @@ import os
 import re
 import io
 import base64
+import hashlib
+from html import escape
 from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from collections import defaultdict
@@ -11,7 +13,7 @@ import streamlit as st
 # ==============================
 # VERSÃO
 # ==============================
-VERSAO = "V1.8"
+VERSAO = "V1.9"
 
 # ==============================
 # EXIBIÇÃO
@@ -1200,12 +1202,171 @@ def processar_bytes(arquivo_bytes, log):
             "empresa":     cod_empresa,
             "competencia": competencia,
             "modelo":      extras["modelo"],
+            "metricas": {
+                "normais":   qtd_normais,
+                "rateio":    extras["qtd_rateio"],
+                "reg11":     extras["qtd_reg11"],
+                "dsr":       extras["qtd_dsr"],
+                "reg40":     extras["qtd_reg40"],
+                "saude":     qtd_saude,
+                "linhas":    len(linhas_saida),
+                "alocacoes": len(extras["alocacao"]),
+            },
         }
         return linhas_saida, meta, extras["alocacao"]
 
     except Exception as e:
         log.append(f"ERRO: {e}")
         return None, None, None
+
+
+# ==============================
+# VÁRIAS PLANILHAS — TXT ÚNICO COM TODAS AS EMPRESAS
+# Cada planilha é convertida isoladamente (mesmas regras de um arquivo só).
+# Os blocos de cada empresa entram inteiros e na ordem original
+# (registro 10 seguido dos filhos 11 / 20 / 25 / 40); só depois vem a próxima
+# empresa. Empresas ordenadas por código e competência.
+# Qualquer erro em qualquer planilha -> nenhum arquivo é gerado.
+# ==============================
+CAMPOS_METRICAS = ("normais", "rateio", "reg11", "dsr", "reg40", "saude", "linhas", "alocacoes")
+
+
+def comp_legivel(comp):
+    return f"{comp[4:]}/{comp[:4]}" if len(comp) == 6 else comp
+
+
+def nome_arquivo_saida(tipo, chaves):
+    """1 empresa: 0000000001_Eventos_202605.txt | várias: 3_empresas_Eventos_202605.txt"""
+    empresas   = sorted({e for e, _ in chaves})
+    comps      = sorted({c for _, c in chaves})
+    parte_emp  = empresas[0] if len(empresas) == 1 else f"{len(empresas)}_empresas"
+    parte_comp = comps[0] if len(comps) == 1 else "varias_competencias"
+    return f"{parte_emp}_{tipo}_{parte_comp}.txt"
+
+
+def processar_varios(arquivos, log):
+    """
+    arquivos: lista de (nome_arquivo, bytes).
+    Retorna dict: ok, linhas, alocacao, chaves, modelos, metricas, resumo.
+    """
+    total      = len(arquivos)
+    resultados = []
+    resumo     = []
+    vistos     = {}
+    falhas     = 0
+
+    for n, (nome, dados) in enumerate(arquivos, start=1):
+        log.append(f"===== Planilha {n}/{total}: {nome} =====")
+        item_resumo = {
+            "Planilha": nome, "Empresa": "", "Competência": "", "Modelo": "",
+            "Linhas eventos": 0, "Alocações": 0, "Situação": "",
+        }
+        resumo.append(item_resumo)
+
+        hash_arq = hashlib.sha256(dados).hexdigest()
+        if hash_arq in vistos:
+            log.append(
+                f"AVISO: conteúdo idêntico ao da planilha '{vistos[hash_arq]}' — "
+                f"ignorada para não duplicar lançamentos."
+            )
+            item_resumo["Situação"] = "Ignorada (repetida)"
+            continue
+        vistos[hash_arq] = nome
+
+        linhas, meta, aloc = processar_bytes(dados, log)
+        if meta is None:
+            falhas += 1
+            item_resumo["Situação"] = "ERRO — ver log"
+            continue
+
+        item_resumo.update({
+            "Empresa":        meta["empresa"].lstrip("0"),
+            "Competência":    comp_legivel(meta["competencia"]),
+            "Modelo":         meta["modelo"],
+            "Linhas eventos": len(linhas),
+            "Alocações":      len(aloc),
+            "Situação":       "OK" if (linhas or aloc) else "Sem lançamentos",
+        })
+        resultados.append({"nome": nome, "linhas": linhas, "aloc": aloc, "meta": meta,
+                           "resumo": item_resumo})
+
+    # ---------- Agrupa por empresa + competência ----------
+    grupos = {}
+    for r in resultados:
+        chave = (r["meta"]["empresa"], r["meta"]["competencia"])
+        grupos.setdefault(chave, []).append(r)
+
+    log.append("===== Consolidação =====")
+    for (emp, comp), itens in sorted(grupos.items()):
+        if len(itens) > 1:
+            log.append(
+                f"AVISO: empresa {emp.lstrip('0')}, competência {comp_legivel(comp)} em "
+                f"{len(itens)} planilhas ({', '.join(r['nome'] for r in itens)}). "
+                f"Os lançamentos foram gravados juntos no bloco da empresa — "
+                f"confira se não há lançamento repetido."
+            )
+
+    linhas_final = []
+    aloc_final   = []
+    aloc_vistas  = {}
+    erros        = []
+    for chave in sorted(grupos):
+        for r in grupos[chave]:
+            linhas_final.extend(r["linhas"])
+            for linha_aloc in r["aloc"]:
+                emp_a, func, serv, dt = linha_aloc.split(ALOC_SEPARADOR)
+                k = (emp_a, func, dt)
+                anterior = aloc_vistas.get(k)
+                if anterior is None:
+                    aloc_vistas[k] = (serv, r["nome"])
+                    aloc_final.append(linha_aloc)
+                elif anterior[0] != serv:
+                    r["resumo"]["Situação"] = "ERRO — alocação conflitante"
+                    erros.append(
+                        f"Empresa {emp_a}, empregado {func}: dois serviços diferentes na "
+                        f"mesma data da troca ({dt}) — serviço {anterior[0]} na planilha "
+                        f"'{anterior[1]}' e serviço {serv} na planilha '{r['nome']}'."
+                    )
+
+    for e in erros:
+        log.append(f"ERRO: {e}")
+
+    ok = bool(resultados) and not falhas and not erros
+    if not ok:
+        if falhas:
+            log.append(f"ERRO: {falhas} de {total} planilha(s) com erro.")
+        log.append(
+            "ERRO: Nenhum arquivo foi gerado — corrija a(s) planilha(s) indicada(s) "
+            "e gere novamente com todas juntas."
+        )
+        return {"ok": False, "resumo": resumo}
+
+    metricas = {c: sum(r["meta"]["metricas"][c] for r in resultados) for c in CAMPOS_METRICAS}
+    metricas["linhas"]    = len(linhas_final)
+    metricas["alocacoes"] = len(aloc_final)
+    metricas["empresas"]  = len({e for e, _ in grupos})
+    metricas["planilhas"] = len(resultados)
+
+    log.append(
+        f"Planilhas convertidas: {metricas['planilhas']}  |  Empresas: {metricas['empresas']}"
+        f"  |  Linhas no TXT de eventos: {metricas['linhas']}"
+        f"  |  Alocações: {metricas['alocacoes']}"
+    )
+    log.append(
+        "Ordem do TXT: " + " → ".join(
+            f"empresa {e.lstrip('0')} ({comp_legivel(c)})" for e, c in sorted(grupos)
+        )
+    )
+
+    return {
+        "ok":       True,
+        "linhas":   linhas_final,
+        "alocacao": aloc_final,
+        "chaves":   sorted(grupos),
+        "modelos":  sorted({r["meta"]["modelo"] for r in resultados}),
+        "metricas": metricas,
+        "resumo":   resumo,
+    }
 
 
 # ==============================
@@ -1249,6 +1410,11 @@ def montar_instrucoes():
     p.append("<h4>🔹 Passo 4 — Gerar os arquivos TXT</h4>")
     p.append("<p>Faça o upload no campo indicado desta página, clique em "
              "<b>▶ Gerar arquivo TXT</b> e baixe os arquivos.</p>")
+    p.append("<p>Você pode selecionar <b>várias planilhas de uma vez</b> (uma por empresa, "
+             "modelos e competências diferentes são aceitos). Nesse caso é gerado "
+             "<b>um único TXT de Eventos</b> com todas as empresas — cada empresa em um bloco, "
+             "com cada registro 10 seguido dos seus registros filhos, e só depois a próxima "
+             "empresa — e <b>um único Alocacao.txt</b>.</p>")
 
     p.append("<h4>🔹 Passo 5 — Importar no Domínio</h4>")
     p.append("<ol>")
@@ -1326,6 +1492,13 @@ def montar_instrucoes():
     p.append("<ul>")
     p.append("<li>Se houver qualquer erro, <b>nenhum arquivo é gerado</b>: corrija a planilha "
              "conforme o log e gere novamente.</li>")
+    p.append("<li>Com várias planilhas, basta <b>uma</b> com erro para nenhum arquivo ser gerado. "
+             "O resumo por planilha e o log mostram qual corrigir; depois envie todas juntas "
+             "de novo.</li>")
+    p.append("<li>Planilha enviada duas vezes (mesmo conteúdo) é ignorada.</li>")
+    p.append("<li>Mesma empresa e competência em mais de uma planilha: os lançamentos ficam "
+             "juntos no bloco da empresa e o log mostra um aviso — confira se não há "
+             "lançamento repetido.</li>")
     p.append("<li>Um colaborador não pode ter dois serviços diferentes na mesma data da troca.</li>")
     p.append("<li>Linhas repetidas (mesmo colaborador, serviço e data) geram uma única alocação.</li>")
     p.append(f"<li>Códigos de empresa, empregado e serviço na alocação: até "
@@ -1364,6 +1537,13 @@ def montar_instrucoes():
     p.append("<li><b>40</b> — valor da rubrica por serviço; o registro 10 traz o total.</li>")
     p.append("</ul>")
 
+    p.append("<h5>Várias planilhas no mesmo TXT</h5>")
+    p.append("<p>Cada planilha é convertida separadamente, com as mesmas regras. No TXT final as "
+             "empresas ficam em ordem de <b>código da empresa e competência</b>; dentro de cada "
+             "empresa, a ordem é a mesma da conversão individual (registro 10 seguido dos "
+             "registros 11, 20, 25 e 40 dele). O código da empresa vai nas posições finais de "
+             "cada registro 10.</p>")
+
     p.append("<h5>Leiaute do Alocacao.txt</h5>")
     p.append("<p>Campos separados por <b>tabulação</b>, nesta ordem: "
              "<code>Código Empresa | Código Empregado | Código Serviço | Data da Troca (DD/MM/AAAA)</code>. "
@@ -1399,9 +1579,10 @@ def main():
                 📊 Conversor de Eventos &nbsp;|&nbsp; {VERSAO}
             </h2>
             <p style="color:#DDDDDD; margin:6px 0 0 0; font-family:'Segoe UI',Arial,sans-serif;">
-                Selecione o Excel de origem e clique em
+                Selecione uma ou mais planilhas Excel de origem e clique em
                 <strong>Gerar arquivo TXT</strong>.
-                O modelo da planilha é identificado <b>automaticamente</b>.
+                O modelo de cada planilha é identificado <b>automaticamente</b> e
+                todas as empresas saem em um <b>único TXT</b>.
             </p>
         </div>
         """,
@@ -1442,12 +1623,14 @@ def main():
     st.markdown("---")
 
     defaults = {
-        "log_conv":    [f"Aplicação pronta. Versão: {VERSAO}"],
-        "txt_conv":    None,
-        "nome_conv":   "Eventos.txt",
-        "txt_aloc":    None,
-        "nome_aloc":   "Alocacao.txt",
-        "modelo_conv": None,
+        "log_conv":      [f"Aplicação pronta. Versão: {VERSAO}"],
+        "txt_conv":      None,
+        "nome_conv":     "Eventos.txt",
+        "txt_aloc":      None,
+        "nome_aloc":     "Alocacao.txt",
+        "modelo_conv":   None,
+        "metricas_conv": None,
+        "resumo_conv":   [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1458,17 +1641,20 @@ def main():
         "ou Vertical V2." if EXIBIR_MODELOS_PLANO else
         "Sem plano de saúde, Serviço ou Vertical V2."
     )
-    arquivo = st.file_uploader(
-        "Excel de origem (.xlsx ou .xls)",
+    arquivos = st.file_uploader(
+        "Excel de origem (.xlsx ou .xls) — uma ou mais planilhas",
         type=["xlsx", "xls"],
-        help=f"{modelos_ajuda} Detectado automaticamente.",
+        accept_multiple_files=True,
+        help=(f"{modelos_ajuda} Detectado automaticamente. "
+              "Selecione várias planilhas (Ctrl + clique) para gerar um TXT único "
+              "com todas as empresas."),
     )
 
     col1, col2 = st.columns([1, 1])
     with col1:
         gerar = st.button(
             "▶ Gerar arquivo TXT",
-            disabled=(arquivo is None),
+            disabled=not arquivos,
             use_container_width=True,
             type="primary",
         )
@@ -1481,40 +1667,56 @@ def main():
         st.session_state.log_conv = ["Campos limpos."]
         st.rerun()
 
-    if gerar and arquivo is not None:
-        st.session_state.log_conv    = [f"Iniciando processamento... ({VERSAO})"]
-        st.session_state.txt_conv    = None
-        st.session_state.txt_aloc    = None
-        st.session_state.nome_conv   = "Eventos.txt"
-        st.session_state.nome_aloc   = "Alocacao.txt"
-        st.session_state.modelo_conv = None
+    if gerar and arquivos:
+        st.session_state.log_conv      = [
+            f"Iniciando processamento... ({VERSAO}) — {len(arquivos)} planilha(s)"
+        ]
+        st.session_state.txt_conv      = None
+        st.session_state.txt_aloc      = None
+        st.session_state.nome_conv     = "Eventos.txt"
+        st.session_state.nome_aloc     = "Alocacao.txt"
+        st.session_state.modelo_conv   = None
+        st.session_state.metricas_conv = None
+        st.session_state.resumo_conv   = []
 
-        linhas, meta, aloc = processar_bytes(arquivo.read(), st.session_state.log_conv)
+        res = processar_varios(
+            [(a.name, a.getvalue()) for a in arquivos], st.session_state.log_conv
+        )
+        st.session_state.resumo_conv = res["resumo"]
 
-        if meta:
-            emp, comp = meta["empresa"], meta["competencia"]
-            st.session_state.modelo_conv = meta["modelo"]
-            if linhas:
-                conteudo = "\n".join(linhas) + "\n"
+        if res["ok"]:
+            st.session_state.metricas_conv = res["metricas"]
+            modelos = res["modelos"]
+            st.session_state.modelo_conv = (
+                modelos[0] if len(modelos) == 1 else f"{len(modelos)} modelos (ver resumo)"
+            )
+            if res["linhas"]:
+                conteudo = "\n".join(res["linhas"]) + "\n"
                 st.session_state.txt_conv  = conteudo.encode("utf-8", errors="replace")
-                st.session_state.nome_conv = f"{emp}_Eventos_{comp}.txt"
+                st.session_state.nome_conv = nome_arquivo_saida("Eventos", res["chaves"])
                 st.session_state.log_conv.append("Arquivo de eventos gerado com sucesso.")
-            if aloc:
-                conteudo_aloc = "\n".join(aloc) + "\n"
+            if res["alocacao"]:
+                conteudo_aloc = "\n".join(res["alocacao"]) + "\n"
                 st.session_state.txt_aloc  = conteudo_aloc.encode("utf-8", errors="replace")
-                st.session_state.nome_aloc = f"{emp}_Alocacao_{comp}.txt"
+                st.session_state.nome_aloc = nome_arquivo_saida("Alocacao", res["chaves"])
                 st.session_state.log_conv.append(
                     "Arquivo de alocação gerado com sucesso (separado por tabulação)."
                 )
-            if not linhas and not aloc:
+            if not res["linhas"] and not res["alocacao"]:
                 st.session_state.log_conv.append("Nenhum lançamento ou alocação encontrado.")
 
         st.rerun()
 
+    metricas = st.session_state.metricas_conv
+
     if st.session_state.txt_conv is not None or st.session_state.txt_aloc is not None:
         modelo_txt = (f" — modelo: **{st.session_state.modelo_conv}**"
                       if st.session_state.modelo_conv else "")
-        st.success(f"✅ Arquivo(s) gerado(s) com sucesso{modelo_txt}")
+        qtd_txt = ""
+        if metricas and metricas["planilhas"] > 1:
+            qtd_txt = (f" — **{metricas['planilhas']} planilhas / "
+                       f"{metricas['empresas']} empresa(s)** no mesmo arquivo")
+        st.success(f"✅ Arquivo(s) gerado(s) com sucesso{modelo_txt}{qtd_txt}")
         d1, d2 = st.columns(2)
         with d1:
             if st.session_state.txt_conv is not None:
@@ -1552,30 +1754,29 @@ def main():
                 if len(linhas_prev) > 500:
                     st.caption(f"Exibindo 500 de {len(linhas_prev)} linhas.")
 
+    if len(st.session_state.resumo_conv) > 1:
+        st.markdown("**Resumo por planilha**")
+        st.dataframe(
+            pd.DataFrame(st.session_state.resumo_conv),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    if metricas:
+        c0, c1, c2, c3, c4, c5, c6, c7 = st.columns(8)
+        c0.metric("Empresas",               metricas["empresas"])
+        c1.metric("Eventos normais",        metricas["normais"])
+        c2.metric("Eventos c/ rateio",      metricas["rateio"])
+        c3.metric("Faltas com data",        metricas["reg11"])
+        c4.metric("Faltas DSR",             metricas["dsr"])
+        c5.metric("Eventos plano de saúde", metricas["saude"])
+        c6.metric("Total de linhas",        metricas["linhas"])
+        c7.metric("Alocações",              metricas["alocacoes"])
+
     log = st.session_state.log_conv
 
-    def ler_metrica(rotulo):
-        for linha in log:
-            if linha.startswith(rotulo):
-                try:
-                    return int(linha.split(":")[-1].strip())
-                except Exception:
-                    return None
-        return None
-
-    normais = ler_metrica("Eventos normais")
-    if normais is not None:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-        c1.metric("Eventos normais",        normais)
-        c2.metric("Eventos c/ rateio",      ler_metrica("Eventos c/ rateio"))
-        c3.metric("Faltas com data",        ler_metrica("Registros 11"))
-        c4.metric("Faltas DSR",             ler_metrica("Faltas DSR"))
-        c5.metric("Eventos plano de saúde", ler_metrica("Eventos plano de saúde"))
-        c6.metric("Total de linhas",        ler_metrica("Total de linhas"))
-        c7.metric("Alocações",              ler_metrica("Alocações"))
-
     st.markdown("**Log de processamento**")
-    log_texto = "\n".join(log)
+    log_texto = escape("\n".join(log))
     tem_erro  = any(str(l).startswith("ERRO") for l in log)
     cor_borda = "#D32F2F" if tem_erro else "#388E3C"
 
